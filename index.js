@@ -124,7 +124,7 @@ let swaggerSpec;
         version: '1.0.0',
         description: 'API para gestionar registros de la rifa/lotto',
       },
-      servers: [{ url: baseUrl, description: 'Local/Dev' }],
+      servers: [{ url: baseUrl, description: 'Server' }],
       components: {
         securitySchemes: {
           // 👇 Solo apiKey por header
