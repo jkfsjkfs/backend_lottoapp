@@ -11,7 +11,7 @@ const options = {
     },
     servers: [
       { url: 'http://localhost:3001', description: 'Local' },
-      { url: 'https://backend-lottoapp-ijsj.onrender.com/', description: 'Producción' },
+      { url: 'https://backend-lottoapp-ijsj.onrender.com', description: 'Producción' },
 
     ],
   },
