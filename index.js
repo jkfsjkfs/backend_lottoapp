@@ -20,6 +20,8 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(express.json());
 
 // CORS
+app.use(cors());
+/* 
 if (isProd) {
   const allowed = new Set([process.env.FRONTEND_ORIGIN].filter(Boolean));
   app.use(cors({
@@ -34,6 +36,7 @@ if (isProd) {
   // Dev: más permisivo para Expo/localhost
   app.use(cors());
 }
+*/
 
 // Helmet (desactiva CSP para Swagger UI si estuviera activo)
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -157,6 +160,8 @@ app.get('/', (req, res) => {
 });
 
 
+
+
 // Middleware x-app-key (opcional) — solo para /api/*
 function appKeyGuard(req, res, next) {
 
@@ -252,106 +257,6 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
 });
 
 // ======= Rutas API =======
-
-/**
- * @openapi
- * /api/registros:
- *   post:
- *     summary: Crea un registro de número de rifa
- *     tags: [Registros]
- *     security: [ { appKeyHeader: [] } ]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [numero, nombre, telefono]
- *             properties:
- *               numero: { type: string, example: "1234" }
- *               nombre: { type: string, example: "Juan Pérez" }
- *               telefono: { type: string, example: "3001234567" }
- *     responses:
- *       200: { description: Registro exitoso }
- *       400: { description: Datos incompletos }
- *       401: { description: No autorizado }
- *       500: { description: Error en el servidor }
- */
-app.post('/api/registros', appKeyGuard, async (req, res) => {
-  const { numero, nombre, telefono } = req.body;
-  if (!numero || !nombre || !telefono) {
-    return res.status(400).json({ error: 'Datos incompletos' });
-  }
-
-  try {
-    const conn = await pool.getConnection();
-    try {
-      await conn.execute(
-        // NOTA: tu BD dump usa tabla `registro` (singular). Aquí mantengo `registros` porque así estaba tu código.
-        // Si tu tabla real es `registro`, cambia a:
-        // 'INSERT INTO registro (numero, nombre, telefono) VALUES (?, ?, ?)'
-        'INSERT INTO registros (numero, nombre, telefono) VALUES (?, ?, ?)',
-        [numero, nombre, telefono]
-      );
-      res.status(200).json({ message: 'Registro exitoso' });
-    } finally {
-      conn.release();
-    }
-  } catch (error) {
-    console.error('Error al guardar registro:', error);
-    res.status(500).json({ error: 'Error en el servidor' });
-  }
-});
-
-/**
- * @openapi
- * /api/registros/{numero}:
- *   get:
- *     summary: Obtiene un registro por número
- *     tags: [Registros]
- *     security: [ { appKeyHeader: [] } ]
- *     parameters:
- *       - in: path
- *         name: numero
- *         required: true
- *         schema: { type: string }
- *         description: Número de rifa (p. ej. "1234")
- *     responses:
- *       200:
- *         description: OK (array con registros o null)
- *         content:
- *           application/json:
- *             schema:
- *               oneOf:
- *                 - type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id: { type: integer }
- *                       numero: { type: string }
- *                       nombre: { type: string }
- *                       telefono: { type: string }
- *                       fecha: { type: string, format: date-time }
- *                 - type: "null"
- *       401: { description: No autorizado }
- *       500: { description: Error en el servidor }
- */
-app.get('/api/registros/:numero', appKeyGuard, async (req, res) => {
-  const { numero } = req.params;
-  try {
-    const conn = await pool.getConnection();
-    try {
-      const [rows] = await conn.execute('SELECT * FROM registros WHERE numero = ?', [numero]);
-      if (rows.length > 0) res.json(rows);
-      else res.json(null);
-    } finally {
-      conn.release();
-    }
-  } catch (error) {
-    console.error('Error al verificar número:', error);
-    res.status(500).json({ error: 'Error al consultar el número' });
-  }
-});
 
 /**
  * @openapi
@@ -591,6 +496,255 @@ app.get('/api/ventas/ultima', appKeyGuard, async (req, res) => {
   } catch (err) {
     console.error('Error al consultar última venta:', err);
     res.status(500).json({ error: 'Error al consultar última venta' });
+  }
+});
+
+/**
+ * @openapi
+ * /api/reportes/ventas:
+ *   get:
+ *     summary: Ventas detalladas en un rango de fechas (opcional por usuario)
+ *     tags: [Reportes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+  *       - in: query
+ *         name: idusuario
+ *         required: false
+ *         schema: { type: integer, example: 5 }
+ *         description: Si se envía, filtra las ventas de un usuario específico* 
+ *       - in: query
+ *         name: desde
+ *         required: true
+ *         schema: { type: string, format: date, example: "2025-08-01" }
+ *       - in: query
+ *         name: hasta
+ *         required: true
+ *         schema: { type: string, format: date, example: "2025-08-18" }
+ *     responses:
+ *       200:
+ *         description: Lista de ventas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id: { type: integer }
+ *                   idusuario: { type: integer }
+ *                   nombre: { type: string }
+ *                   telefono: { type: string }
+ *                   fecha: { type: string, format: date-time }
+ *                   numero: { type: string }
+ *                   valor: { type: number }
+ *                   loteria: { type: string }
+ */
+app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
+  const { idusuario, desde, hasta } = req.query;
+  if (!desde || !hasta) {
+    return res.status(400).json({ error: 'Faltan fechas' });
+  }
+  try {
+    let sql = `
+      SELECT r.id, r.idusuario, r.nombre, r.telefono, r.fecha, 
+             d.numero, d.valor, l.descrip as loteria
+      FROM registro r
+      JOIN detalle d ON d.idregistro = r.id
+      JOIN loteria l ON l.idloteria = d.idloteria
+      WHERE DATE(r.fecha) BETWEEN ? AND ?
+    `;
+    const params = [desde, hasta];
+
+    if (idusuario) {
+      sql += " AND r.idusuario = ?";
+      params.push(idusuario);
+    }
+
+    sql += " ORDER BY r.fecha DESC";
+
+    const [rows] = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error consultando ventas' });
+  }
+});
+
+
+/**
+ * @openapi
+ * /api/reportes/premios:
+ *   get:
+ *     summary: Premios (ganadores) por fecha
+ *     tags: [Reportes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: fecha
+ *         required: true
+ *         schema: { type: string, format: date, example: "2025-08-18" }
+ *     responses:
+ *       200:
+ *         description: Lista de premios por fecha
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   numero: { type: string }
+ *                   valor: { type: number }
+ *                   nombre: { type: string }
+ *                   telefono: { type: string }
+ *                   loteria: { type: string }
+ */
+app.get('/api/reportes/premios', appKeyGuard, async (req, res) => {
+  const { fecha } = req.query;
+  if (!fecha) return res.status(400).json({ error: 'Falta la fecha' });
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT d.numero, d.valor, r.nombre, r.telefono, l.descrip as loteria
+       FROM detalle d
+       JOIN registro r ON r.id = d.idregistro
+       JOIN loteria l ON l.idloteria = d.idloteria
+       WHERE DATE(r.fecha) = ? 
+         AND d.numero IN (
+           SELECT numeroGanador FROM resultados WHERE DATE(fecha) = ?
+         )`,
+      [fecha, fecha]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error consultando premios' });
+  }
+});
+
+
+/**
+ * @openapi
+ * /api/reportes/resultados:
+ *   get:
+ *     summary: Resultados de loterías por fecha
+ *     tags: [Reportes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: fecha
+ *         required: true
+ *         schema: { type: string, format: date, example: "2025-08-18" }
+ *     responses:
+ *       200:
+ *         description: Resultados de loterías
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   loteria: { type: string }
+ *                   numeroGanador: { type: string }
+ *                   serie: { type: string }
+ *                   fecha: { type: string, format: date-time }
+ */
+app.get('/api/reportes/resultados', appKeyGuard, async (req, res) => {
+  const { fecha } = req.query;
+  if (!fecha) return res.status(400).json({ error: 'Falta la fecha' });
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT l.descrip as loteria, r.numeroGanador, r.serie, r.fecha
+       FROM resultados r
+       JOIN loteria l ON l.idloteria = r.idloteria
+       WHERE DATE(r.fecha) = ?`,
+      [fecha]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error consultando resultados' });
+  }
+});
+
+
+/**
+ * @openapi
+ * /api/reportes/cierres:
+ *   get:
+ *     summary: Horarios de cierre de las loterías
+ *     tags: [Reportes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de cierres
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   idloteria: { type: integer }
+ *                   descrip: { type: string }
+ *                   hora_cierre: { type: string }
+ */
+app.get('/api/reportes/cierres', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT idloteria, descrip, hora_cierre FROM loteria`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error consultando cierres' });
+  }
+});
+
+/**
+ * @openapi
+ * /api/memvar:
+ *   get:
+ *     summary: Variables generales de configuración
+ *     tags: [Configuración]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: variable
+ *         required: false
+ *         schema: { type: string }
+ *         description: Nombre de la variable a consultar
+ *     responses:
+ *       200:
+ *         description: Lista de variables o variable puntual
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   variable: { type: string }
+ *                   valor: { type: string }
+ */
+app.get('/api/memvar', appKeyGuard, async (req, res) => {
+  const { variable } = req.query;
+  try {
+    let rows;
+    if (variable) {
+      [rows] = await pool.query(
+        `SELECT variable, valor FROM memvar WHERE variable = ?`,
+        [variable]
+      );
+    } else {
+      [rows] = await pool.query(`SELECT variable, valor FROM memvar`);
+    }
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error consultando variables' });
   }
 });
 
