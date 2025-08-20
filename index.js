@@ -138,8 +138,13 @@ let swaggerSpec;
   });
 
   // Proteger /docs (solo accesible desde localhost en dev)
+
+  if (!process.env.DOCS_USER || !process.env.DOCS_PASS) {
+    throw new Error("Son obligatorias las configuraciones de protección DOCS_USER,DOCS_PASS");
+  }
+
   const docsAuth = basicAuth({
-    users: { [process.env.DOCS_USER || 'admin']: process.env.DOCS_PASS || 'changeme' },
+    users: { [process.env.DOCS_USER]: process.env.DOCS_PASS },
     challenge: true,
   });
 
