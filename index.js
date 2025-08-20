@@ -113,7 +113,8 @@ async function verifyPassword(inputPassword, stored) {
 
 // Swagger Spec (solo se construye si NO estás en producción)
 let swaggerSpec;
-if (!isProd) {
+
+
   const baseUrl = process.env.PUBLIC_BASE_URL || `http://localhost:${port}`;
   swaggerSpec = swaggerJSDoc({
     definition: {
@@ -123,7 +124,7 @@ if (!isProd) {
         version: '1.0.0',
         description: 'API para gestionar registros de la rifa/lotto',
       },
-      servers: [{ url: baseUrl, description: 'Local/Dev' }],
+      servers: [{ url: baseUrl, description: 'Server' }],
       components: {
         securitySchemes: {
           // 👇 Solo apiKey por header
@@ -149,7 +150,7 @@ if (!isProd) {
     swaggerUi.serve,
     swaggerUi.setup(swaggerSpec)
   );
-}
+
 
 // Home
 app.get('/', (req, res) => {
