@@ -225,8 +225,16 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT idusuario, idperfil, nombre, login, password, activo, comision
-         FROM usuario
+      ` SELECT u.idusuario, u.idperfil, u.nombre, u.login, u.password, u.activo 
+        , IFNULL((
+			  SELECT c.porcentaje
+			  FROM comision c
+			  WHERE c.idusuario = u.idusuario
+				AND c.fecha <= NOW()
+			  ORDER BY c.fecha DESC, c.idcomision DESC
+			  LIMIT 1
+			),0) AS comision
+         FROM usuario u 
         WHERE login = ?
         LIMIT 1`,
       [login]
@@ -254,6 +262,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
       idperfil: row.idperfil,
       nombre: row.nombre,
       login: row.login,
+      comision: row.comision
     });
     
   } catch (err) {
@@ -268,9 +277,20 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
  * @openapi
  * /api/loterias:
  *   get:
- *     summary: Lista de loterías activas
+ *     summary: Lista de loterías
  *     tags: [Loterias]
  *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: series
+ *         required: false
+ *         schema: 
+ *           type: integer
+ *           enum: [0, 1]
+ *         description: 
+ *           0 = solo sin series,
+ *           1 = solo con series,
+ *           vacío o nulo = todas
  *     responses:
  *       200:
  *         description: Lista de loterías
@@ -282,17 +302,43 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
  *                 type: object
  *                 properties:
  *                   idloteria: { type: integer }
- *                   nombre: { type: string }
+ *                   codigo: { type: string }
+ *                   descrip: { type: string }
+ *                   dia: { type: integer }
+ *                   hora_ini: { type: string, format: time }
+ *                   hora_fin: { type: string, format: time }
  *       401: { description: No autorizado }
  *       500: { description: Error en el servidor }
  */
 app.get('/api/loterias', appKeyGuard, async (req, res) => {
+  const { series } = req.query;
+
+  let cSql = '';
+  if(series)
+    cSql = ` AND l.serie = ${series} `
+  
+
   try {
     const conn = await pool.getConnection();
     try {
-      const [rows] = await conn.execute(
-        'SELECT idloteria, descrip FROM loteria WHERE activa'
-      );
+      const [rows] = await conn.query(`
+        SELECT 
+            l.idloteria,
+            l.codigo,
+            l.descrip,
+            c.dia,
+            c.hora_ini,
+            c.hora_fin
+        FROM loteria l
+        JOIN cierre c 
+            ON l.idloteria = c.idloteria
+           AND c.dia = DAYOFWEEK(NOW())
+           AND CAST(NOW() AS TIME) BETWEEN c.hora_ini AND c.hora_fin
+        WHERE l.activa = 1  AND c.activo = 1
+        ${cSql}
+        ORDER BY c.hora_fin , l.codigo
+      `);
+
       res.json(rows);
     } finally {
       conn.release();
@@ -300,6 +346,40 @@ app.get('/api/loterias', appKeyGuard, async (req, res) => {
   } catch (error) {
     console.error('Error al consultar loterías:', error);
     res.status(500).json({ error: 'Error al obtener las loterías' });
+  }
+});
+
+/**
+ * @openapi
+ * /api/series:
+ *   get:
+ *     summary: Lista de series activas
+ *     tags: [Series]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de series
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   idserie: { type: integer }
+ *                   descrip: { type: string }
+ */
+app.get('/api/series', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT idserie, descrip 
+         FROM serie 
+        ORDER BY descrip`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Error al consultar series:', err);
+    res.status(500).json({ error: 'Error al obtener series' });
   }
 });
 
@@ -333,8 +413,10 @@ app.get('/api/loterias', appKeyGuard, async (req, res) => {
  *                 items:
  *                   type: object
  *                   properties:
- *                     numero: { type: string }
- *                     valor: { type: number }
+ *                     numero: { type: string, example: "9999" }
+ *                     valor: { type: number, example:  0 }
+ *                     idserie: { type: number, example:  0 }
+ *                     valorCombinado: { type: number, example:  0 }
  *     responses:
  *       200: { description: Apuesta registrada con éxito }
  *       400: { description: Datos incompletos }
@@ -343,7 +425,7 @@ app.get('/api/loterias', appKeyGuard, async (req, res) => {
 app.post('/api/apuestas', appKeyGuard, async (req, res) => {
   const { idusuario, nombre, telefono, loterias, apuestas } = req.body;
 
-  if (!idusuario || !nombre || !telefono || !Array.isArray(loterias) || !Array.isArray(apuestas)) {
+  if (!idusuario || !Array.isArray(loterias) || !Array.isArray(apuestas)) {
     return res.status(400).json({ error: 'Datos incompletos' });
   }
 
@@ -361,10 +443,26 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
     // 2) Insertar detalles (cruce apuestas × loterías)
     for (const ap of apuestas) {
       for (const lot of loterias) {
-        await conn.execute(
+
+        const [detresult] =await conn.execute(
           'INSERT INTO detalle (idregistro, numero, idloteria, valor) VALUES (?, ?, ?, ?)',
           [idregistro, ap.numero, lot.idloteria, ap.valor]
         );
+        const detregistro = detresult.insertId;
+        
+        if(ap.idserie > 0){
+          await conn.execute(
+            'INSERT INTO detserie (iddetalle, idserie) VALUES (?, ?)',
+            [detregistro, ap.idserie]
+          );
+        }
+        else if(ap.valorCombinado > 0)
+        {
+          await conn.execute(
+            'INSERT INTO combinado (iddetalle, valor) VALUES (?, ?)',
+            [detregistro, ap.valorCombinado]
+          );
+        }
       }
     }
 
@@ -407,6 +505,7 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *               properties:
  *                 ventasTotales: { type: number }
  *                 comisiones: { type: number }
+ *                 cantidad: { type: integer }
  */
 app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   const { idusuario, fecha } = req.query;
@@ -417,30 +516,33 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   try {
     const conn = await pool.getConnection();
     try {
-      // Traer comision del usuario
-      const [userRows] = await conn.execute(
-        'SELECT comision FROM usuario WHERE idusuario = ?',
-        [idusuario]
-      );
-      if (userRows.length === 0) {
-        return res.status(404).json({ error: 'Usuario no encontrado' });
-      }
-      const porcentaje = userRows[0].comision || 0;
-
-      // Sumar todas las apuestas del día para el usuario
       const [rows] = await conn.execute(
-        `SELECT SUM(d.valor) as total
-           FROM registro r
-           JOIN detalle d ON r.id = d.idregistro
-          WHERE r.idusuario = ? 
-            AND DATE(r.fecha) = ?`,
-        [idusuario, fecha]
+        `
+        SELECT 
+          (
+            SELECT c.porcentaje
+            FROM comision c
+            WHERE c.idusuario = ?
+              AND c.fecha <= ?
+            ORDER BY c.fecha DESC, c.idcomision DESC
+            LIMIT 1
+          ) AS porcentaje,
+          SUM(d.valor) AS total,
+          COUNT(DISTINCT r.id) AS cantidad
+        FROM registro r
+        JOIN detalle d ON r.id = d.idregistro
+        WHERE r.idusuario = ?
+          AND DATE(r.fecha) = ?
+        `,
+        [idusuario, fecha, idusuario, fecha]
       );
 
-      const ventasTotales = rows[0].total || 0;
-      const comisiones = ventasTotales * (porcentaje / 100);
+      const porcentaje = rows[0]?.porcentaje || 0;
+      const ventasTotales = rows[0]?.total || 0;
+      const comisiones = Math.round(ventasTotales * (porcentaje / 100));
+      const cantidad = rows[0]?.cantidad || 0;
 
-      res.json({ ventasTotales, comisiones });
+      res.json({ ventasTotales, comisiones, cantidad });
     } finally {
       conn.release();
     }
@@ -449,6 +551,8 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
     res.status(500).json({ error: 'Error interno' });
   }
 });
+
+
 
 /**
  * @openapi
@@ -509,26 +613,28 @@ app.get('/api/ventas/ultima', appKeyGuard, async (req, res) => {
  * @openapi
  * /api/reportes/ventas:
  *   get:
- *     summary: Ventas detalladas en un rango de fechas (opcional por usuario)
+ *     summary: Ventas detalladas en un rango de fechas (agrupadas por registro)
  *     tags: [Reportes]
  *     security: [ { appKeyHeader: [] } ]
  *     parameters:
-  *       - in: query
+ *       - in: query
  *         name: idusuario
  *         required: false
- *         schema: { type: integer, example: 5 }
- *         description: Si se envía, filtra las ventas de un usuario específico* 
+ *         schema: { type: integer, example: 1031 }
+ *         description: Si se envía, filtra las ventas de un usuario específico.
  *       - in: query
  *         name: desde
  *         required: true
  *         schema: { type: string, format: date, example: "2025-08-01" }
+ *         description: Fecha inicial del rango (YYYY-MM-DD).
  *       - in: query
  *         name: hasta
  *         required: true
- *         schema: { type: string, format: date, example: "2025-08-18" }
+ *         schema: { type: string, format: date, example: "2025-08-20" }
+ *         description: Fecha final del rango (YYYY-MM-DD).
  *     responses:
  *       200:
- *         description: Lista de ventas
+ *         description: Lista de ventas agrupadas por registro
  *         content:
  *           application/json:
  *             schema:
@@ -536,27 +642,42 @@ app.get('/api/ventas/ultima', appKeyGuard, async (req, res) => {
  *               items:
  *                 type: object
  *                 properties:
- *                   id: { type: integer }
- *                   idusuario: { type: integer }
- *                   nombre: { type: string }
- *                   telefono: { type: string }
- *                   fecha: { type: string, format: date-time }
- *                   numero: { type: string }
- *                   valor: { type: number }
- *                   loteria: { type: string }
+ *                   id: { type: integer, example: 49 }
+ *                   idusuario: { type: integer, example: 1031 }
+ *                   nombre: { type: string, example: "JuanC" }
+ *                   telefono: { type: string, example: "3165218367" }
+ *                   fecha: { type: string, format: date-time, example: "2025-08-20T19:50:43.000Z" }
+ *                   detalles:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         numero: { type: string, example: "2258" }
+ *                         valor: { type: number, example: 2000 }
+ *                         loteria: { type: string, example: "Medellin" }
+ *       400:
+ *         description: Faltan fechas en la consulta
+ *       500:
+ *         description: Error consultando ventas
  */
 app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
   const { idusuario, desde, hasta } = req.query;
   if (!desde || !hasta) {
     return res.status(400).json({ error: 'Faltan fechas' });
   }
+
   try {
     let sql = `
-      SELECT r.id, r.idusuario, r.nombre, r.telefono, r.fecha, 
-             d.numero, d.valor, l.descrip as loteria
+      SELECT r.id, r.idusuario, r.nombre, r.telefono, r.fecha,
+             d.numero, d.valor, l.descrip as loteria, 
+             IFNULL(s.descrip,'') AS serie, 
+             IFNULL(c.valor,0) as combinado
       FROM registro r
       JOIN detalle d ON d.idregistro = r.id
       JOIN loteria l ON l.idloteria = d.idloteria
+        LEFT JOIN detserie ds ON d.iddetalle = ds.iddetalle 
+		    LEFT JOIN serie s ON ds.idserie = s.idserie 
+		    LEFT JOIN combinado c ON d.iddetalle = c.iddetalle 
       WHERE DATE(r.fecha) BETWEEN ? AND ?
     `;
     const params = [desde, hasta];
@@ -569,12 +690,36 @@ app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
     sql += " ORDER BY r.fecha DESC";
 
     const [rows] = await pool.query(sql, params);
-    res.json(rows);
+
+    // Agrupar en Node
+    const registros = {};
+    rows.forEach(r => {
+      if (!registros[r.id]) {
+        registros[r.id] = {
+          id: r.id,
+          idusuario: r.idusuario,
+          nombre: r.nombre,
+          telefono: r.telefono,
+          fecha: r.fecha,
+          detalles: []
+        };
+      }
+      registros[r.id].detalles.push({
+        numero: r.numero,
+        valor: r.valor,
+        loteria: r.loteria,
+        serie: r.serie,
+        combinado: r.combinado
+      });
+    });
+
+    res.json(Object.values(registros));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error consultando ventas' });
   }
 });
+
 
 
 /**
@@ -611,14 +756,10 @@ app.get('/api/reportes/premios', appKeyGuard, async (req, res) => {
 
   try {
     const [rows] = await pool.query(
-      `SELECT d.numero, d.valor, r.nombre, r.telefono, l.descrip as loteria
-       FROM detalle d
-       JOIN registro r ON r.id = d.idregistro
-       JOIN loteria l ON l.idloteria = d.idloteria
-       WHERE DATE(r.fecha) = ? 
-         AND d.numero IN (
-           SELECT numeroGanador FROM resultados WHERE DATE(fecha) = ?
-         )`,
+      `SELECT p.*, l.descrip as loteria, l.codigo
+        FROM premios p 
+        JOIN loteria l ON p.idloteria = l.idloteria
+      WHERE DATE(p.fecha_registro) = ?;`,
       [fecha, fecha]
     );
     res.json(rows);
@@ -662,10 +803,14 @@ app.get('/api/reportes/resultados', appKeyGuard, async (req, res) => {
 
   try {
     const [rows] = await pool.query(
-      `SELECT l.descrip as loteria, r.numeroGanador, r.serie, r.fecha
-       FROM resultados r
-       JOIN loteria l ON l.idloteria = r.idloteria
-       WHERE DATE(r.fecha) = ?`,
+      ` SELECT l.idloteria, l.descrip as loteria, r.numero, r.idresultado,
+			    r.fecha, IFNULL(rs.idserie,0) AS idserie, 
+          IFNULL(s.descrip,'') AS serie
+        FROM resultado r
+	        JOIN loteria l ON l.idloteria = r.idloteria
+		        LEFT JOIN resserie rs ON r.idresultado = rs.idresultado
+		        LEFT JOIN serie s ON rs.idserie = s.idserie
+        WHERE DATE(r.fecha) =  ?`,
       [fecha]
     );
     res.json(rows);
@@ -700,7 +845,19 @@ app.get('/api/reportes/resultados', appKeyGuard, async (req, res) => {
 app.get('/api/reportes/cierres', appKeyGuard, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT idloteria, descrip, hora_cierre FROM loteria`
+      `SELECT 
+            l.idloteria,
+            l.codigo,
+            l.descrip,
+            c.dia,
+            c.hora_ini,
+            c.hora_fin
+        FROM loteria l
+        JOIN cierre c 
+            ON l.idloteria = c.idloteria
+           AND c.dia = DAYOFWEEK(NOW())
+        WHERE l.activa = 1  AND c.activo = 1
+        ORDER BY c.hora_fin , l.codigo`
     );
     res.json(rows);
   } catch (err) {
@@ -753,6 +910,125 @@ app.get('/api/memvar', appKeyGuard, async (req, res) => {
     res.status(500).json({ error: 'Error consultando variables' });
   }
 });
+
+
+
+/**
+ * @openapi
+ * /api/xnumeros:
+ *   get:
+ *     summary: Lista de números bloqueados
+ *     tags: [Restricciones]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de números bloqueados
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   numero: { type: string }
+ */
+app.get('/api/xnumeros', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT numero FROM xnumeros`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Error al consultar xnumeros:', err);
+    res.status(500).json({ error: 'Error al obtener los números bloqueados' });
+  }
+});
+
+/**
+ * @openapi
+ * /api/xcifras:
+ *   get:
+ *     summary: Lista de cifras bloqueadas por lotería
+ *     tags: [Restricciones]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de cifras bloqueadas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   idloteria: { type: integer }
+ *                   cifras: { type: string }
+ */
+app.get('/api/xcifras', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT idloteria, cifras FROM xcifras`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Error al consultar xcifras:', err);
+    res.status(500).json({ error: 'Error al obtener las cifras bloqueadas' });
+  }
+});
+
+
+// 🗑️ Eliminar una venta
+/**
+ * @openapi
+ * /api/ventas/{id}:
+ *   delete:
+ *     summary: Elimina una venta por ID
+ *     tags:
+ *       - Ventas
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         description: ID de la venta a eliminar
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Venta eliminada correctamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       404:
+ *         description: Venta no encontrada
+ *       500:
+ *         description: Error en el servidor
+ */
+app.delete("/api/ventas/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    // primero eliminamos detalles
+    await db.query("DELETE FROM ventadetalle WHERE idventa = ?", [id]);
+
+    // luego cabecera
+    const [result] = await db.query("DELETE FROM venta WHERE idventa = ?", [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Venta no encontrada" });
+    }
+
+    res.json({ success: true, message: "Venta eliminada" });
+  } catch (err) {
+    console.error("Error eliminando venta:", err);
+    res.status(500).json({ error: "Error eliminando venta" });
+  }
+});
+
 
 
 // Arranque
