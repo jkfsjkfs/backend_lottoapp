@@ -275,7 +275,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
 
 /**
  * @openapi
- * /api/loterias:
+ * /api/loteriasdia:
  *   get:
  *     summary: Lista de loterías
  *     tags: [Loterias]
@@ -293,7 +293,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
  *           vacío o nulo = todas
  *     responses:
  *       200:
- *         description: Lista de loterías
+ *         description: Lista de loterías disponibles
  *         content:
  *           application/json:
  *             schema:
@@ -310,7 +310,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
  *       401: { description: No autorizado }
  *       500: { description: Error en el servidor }
  */
-app.get('/api/loterias', appKeyGuard, async (req, res) => {
+app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
   const { series } = req.query;
 
   let cSql = '';
@@ -326,6 +326,7 @@ app.get('/api/loterias', appKeyGuard, async (req, res) => {
             l.idloteria,
             l.codigo,
             l.descrip,
+            l.activa, l.serie, 
             c.dia,
             c.hora_ini,
             c.hora_fin
@@ -911,6 +912,58 @@ app.get('/api/memvar', appKeyGuard, async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/memvar/{variable}:
+ *   put:
+ *     summary: Actualiza el valor de una variable de configuración
+ *     tags: [Configuración]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: variable
+ *         required: true
+ *         schema: { type: string }
+ *         description: Nombre de la variable (ej: apuesta_max)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               valor: { type: string, example: "10000" }
+ *     responses:
+ *       200: { description: Variable actualizada }
+ */
+app.put('/api/memvar/:variable', appKeyGuard, async (req, res) => {
+  const { variable } = req.params;
+  const { valor } = req.body;
+  if (!valor) return res.status(400).json({ error: "Falta el valor" });
+
+  try {
+    const [result] = await pool.query(
+      "UPDATE memvar SET valor = ? WHERE variable = ?",
+      [valor, variable]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Variable no encontrada" });
+    }
+
+    res.json({ success: true, variable, valor });
+  } catch (err) {
+    
+    // Si vino de un trigger (SIGNAL), MySQL manda el mensaje en err.sqlMessage
+    if (err.sqlMessage) {
+      return res.status(400).json({ error: err.sqlMessage });
+    }
+
+    res.status(500).json({ error: "Error al actualizar variable" });
+  }
+});
+
+
 
 
 /**
@@ -1012,22 +1065,269 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
 app.delete("/api/ventas/:id", async (req, res) => {
   const { id } = req.params;
   try {
-    // primero eliminamos detalles
-    await db.query("DELETE FROM ventadetalle WHERE idventa = ?", [id]);
-
-    // luego cabecera
-    const [result] = await db.query("DELETE FROM venta WHERE idventa = ?", [id]);
+    const [result] = await pool.query("DELETE FROM registro WHERE id = ?", [id]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    res.json({ success: true, message: "Venta eliminada" });
+    res.json({ success: true, message: `Venta ${id} eliminada` });
   } catch (err) {
     console.error("Error eliminando venta:", err);
+
+    // Si vino de un trigger (SIGNAL), MySQL manda el mensaje en err.sqlMessage
+    if (err.sqlMessage) {
+      return res.status(400).json({ error: err.sqlMessage });
+    }
+
     res.status(500).json({ error: "Error eliminando venta" });
   }
 });
+
+
+/**
+ * @openapi
+ * /api/admin/numerosbloqueados:
+ *   get:
+ *     summary: Lista de números bloqueados (admin)
+ *     tags: [Admin - Números Bloqueados]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de números bloqueados
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   numero: { type: string, example: "1234" }
+ *       401: { description: No autorizado }
+ *       500: { description: Error interno }
+ */
+app.get('/api/admin/numerosbloqueados', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(`SELECT numero FROM xnumeros`);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error al consultar números bloqueados:", err);
+    res.status(500).json({ error: "Error al obtener los números bloqueados" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/numerosbloqueados:
+ *   post:
+ *     summary: Agrega un número bloqueado
+ *     tags: [Admin - Números Bloqueados]
+ *     security: [ { appKeyHeader: [] } ]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [numero]
+ *             properties:
+ *               numero: { type: string, example: "1234" }
+ *     responses:
+ *       200:
+ *         description: Número agregado correctamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *       400: { description: Datos inválidos }
+ *       500: { description: Error interno }
+ */
+app.post('/api/admin/numerosbloqueados', appKeyGuard, async (req, res) => {
+  const { numero } = req.body;
+  if (!numero) {
+    return res.status(400).json({ error: "El campo 'numero' es obligatorio" });
+  }
+
+  try {
+    const [result] = await pool.query(
+      "INSERT INTO xnumeros (numero) VALUES (?)",
+      [numero]
+    );
+    res.json({ success: true, message: `Número ${numero} agregado`, id: result.insertId });
+  } catch (err) {
+    console.error("Error al agregar número bloqueado:", err);
+    
+    if (err.sqlMessage) {
+      return res.status(400).json({ error: err.sqlMessage });
+    }
+
+    res.status(500).json({ error: "Error al agregar número bloqueado" });
+  }
+
+  
+  
+});
+
+
+/**
+ * @openapi
+ * /api/admin/numerosbloqueados/{numero}:
+ *   delete:
+ *     summary: Elimina un número bloqueado
+ *     tags: [Admin - Números Bloqueados]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: numero
+ *         required: true
+ *         schema: { type: string }
+ *         description: Número a desbloquear
+ *     responses:
+ *       200:
+ *         description: Número eliminado correctamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *       404: { description: Número no encontrado }
+ *       500: { description: Error en el servidor }
+ */
+app.delete('/api/admin/numerosbloqueados/:numero', appKeyGuard, async (req, res) => {
+  const { numero } = req.params;
+  try {
+    const [result] = await pool.query("DELETE FROM xnumeros WHERE numero = ?", [numero]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Número no encontrado" });
+    }
+
+    res.json({ success: true, message: `Número ${numero} eliminado` });
+  } catch (err) {
+    console.error("Error eliminando número:", err);
+    // Si vino de un trigger (SIGNAL), MySQL manda el mensaje en err.sqlMessage
+    if (err.sqlMessage) {
+      return res.status(400).json({ error: err.sqlMessage });
+    }
+
+    res.status(500).json({ error: "Error al eliminar número bloqueado" });
+  }
+});
+
+
+
+
+
+
+
+/**
+ * @openapi
+ * /api/admin/usuarios:
+ *   get:
+ *     summary: Lista todos los usuarios
+ *     tags: [Admin - Usuarios]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200: { description: Lista de usuarios }
+ *   post:
+ *     summary: Crear usuario
+ *     tags: [Admin - Usuarios]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [nombre, email, password, idperfil]
+ *             properties:
+ *               nombre: { type: string, example: "Juan Pérez" }
+ *               email: { type: string, example: "juan@example.com" }
+ *               password: { type: string, example: "secret123" }
+ *               idperfil: { type: integer, example: 3 }
+ *     responses:
+ *       200: { description: Usuario creado }
+ */
+app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT idusuario, nombre, IF(activo,'Activo','INACTIVO') AS Estado, 
+          IF(idperfil= 1,'Administrador',
+                IF(idperfil= 2,'Promotor     ',
+                'Vendedor     ')) 
+	        FROM usuario`
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/usuarios', appKeyGuard, async (req, res) => {
+  const { idperfil, nombre, login, password } = req.body;
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO usuario (idperfil, nombre, login, password, activo) VALUES (?, ?, ?, ?, 1)',
+      [idperfil, nombre, login, password ]
+    );
+    res.json({ id: result.insertId, nombre, email, idperfil });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.delete('/api/admin/usuarios/:id', appKeyGuard, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM usuario WHERE idusuario=?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+/**
+ * @openapi
+ * /api/admin/loterias:
+ *   get:
+ *     summary: Lista todas las loterías (admin)
+ *     tags: [Admin - Loterías]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Lista de loterías
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   idloteria: { type: integer, example: 1 }
+ *                   codigo: { type: string, example: "MED" }
+ *                   descrip: { type: string, example: "Medellín" }
+ *                   activa: { type: boolean, example: true }
+ *       401: { description: No autorizado }
+ *       500: { description: Error interno }
+ */
+app.get('/api/admin/loterias', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(`SELECT * FROM loteria`);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error al consultar loterías:", err);
+    res.status(500).json({ error: "Error al obtener las loterías" });
+  }
+});
+
+
+
 
 
 
