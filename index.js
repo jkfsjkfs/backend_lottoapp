@@ -2,6 +2,7 @@
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const basicAuth = require('express-basic-auth');
+
 // const jwt = require('jsonwebtoken');
 
 require('dotenv').config();
@@ -488,7 +489,7 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *     parameters:
  *       - in: query
  *         name: idusuario
- *         required: true
+ *         required: false
  *         schema: { type: integer }
  *         description: ID del usuario logueado
  *       - in: query
@@ -496,6 +497,11 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *         required: true
  *         schema: { type: string, format: date }
  *         description: Fecha en formato YYYY-MM-DD
+  *       - in: query
+ *         name: idpromotor
+ *         required: false
+ *         schema: { type: integer }
+ *         description: ID del promotor
  *     responses:
  *       200:
  *         description: Resumen de ventas y comisiones
@@ -509,38 +515,56 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *                 cantidad: { type: integer }
  */
 app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
-  const { idusuario, fecha } = req.query;
-  if (!idusuario || !fecha) {
-    return res.status(400).json({ error: 'Faltan parámetros idusuario o fecha' });
+  const { idusuario, fecha, idpromotor } = req.query;
+  if (!fecha) {
+    return res.status(400).json({ error: 'Faltan parámetros de fecha' });
   }
 
   try {
     const conn = await pool.getConnection();
     try {
-      const [rows] = await conn.execute(
-        `
-        SELECT 
-          (
-            SELECT c.porcentaje
-            FROM comision c
-            WHERE c.idusuario = ?
-              AND c.fecha <= ?
-            ORDER BY c.fecha DESC, c.idcomision DESC
-            LIMIT 1
-          ) AS porcentaje,
+
+      let sql = `
+      SELECT 
           SUM(d.valor) AS total,
-          COUNT(DISTINCT r.id) AS cantidad
+          COUNT(DISTINCT r.id) AS cantidad,
+          SUM(
+            d.valor * (
+              SELECT c.porcentaje / 100.0
+              FROM comision c
+              WHERE c.idusuario = r.idusuario
+                AND c.fecha <= ?
+              ORDER BY c.fecha DESC, c.idcomision DESC
+              LIMIT 1
+            )
+          ) AS comisiones
         FROM registro r
         JOIN detalle d ON r.id = d.idregistro
-        WHERE r.idusuario = ?
-          AND DATE(r.fecha) = ?
-        `,
-        [idusuario, fecha, idusuario, fecha]
-      );
+        WHERE DATE(r.fecha) = ? `;
+    
+        const params = [fecha, fecha];
+
+      if (idpromotor) {
+        sql += ` AND r.idusuario IN 
+            (SELECT idvendedor 
+              FROM vendedores 
+              WHERE idpromotor = ?)  
+            ) `;
+          params.push(idpromotor);
+      }
+      else if (idusuario) {
+        sql += ` AND r.idusuario = ?`;
+        params.push(idusuario);
+      }
+
+
+
+      const [rows] = await pool.query(sql, params);
+
 
       const porcentaje = rows[0]?.porcentaje || 0;
       const ventasTotales = rows[0]?.total || 0;
-      const comisiones = Math.round(ventasTotales * (porcentaje / 100));
+      const comisiones = rows[0]?.comisiones || 0;
       const cantidad = rows[0]?.cantidad || 0;
 
       res.json({ ventasTotales, comisiones, cantidad });
@@ -671,6 +695,7 @@ app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
     let sql = `
       SELECT r.id, r.idusuario, r.nombre, r.telefono, r.fecha,
              d.numero, d.valor, l.descrip as loteria, 
+             IFNULL(v.idpromotor,0) AS idpromotor, 
              IFNULL(s.descrip,'') AS serie, 
              IFNULL(c.valor,0) as combinado
       FROM registro r
@@ -679,6 +704,7 @@ app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
         LEFT JOIN detserie ds ON d.iddetalle = ds.iddetalle 
 		    LEFT JOIN serie s ON ds.idserie = s.idserie 
 		    LEFT JOIN combinado c ON d.iddetalle = c.iddetalle 
+        LEFT JOIN vendedores v ON r.idusuario = v.idvendedor        
       WHERE DATE(r.fecha) BETWEEN ? AND ?
     `;
     const params = [desde, hasta];
@@ -702,6 +728,7 @@ app.get('/api/reportes/ventas', appKeyGuard, async (req, res) => {
           nombre: r.nombre,
           telefono: r.telefono,
           fecha: r.fecha,
+          idpromotor: r.idpromotor,
           detalles: []
         };
       }
@@ -757,9 +784,10 @@ app.get('/api/reportes/premios', appKeyGuard, async (req, res) => {
 
   try {
     const [rows] = await pool.query(
-      `SELECT p.*, l.descrip as loteria, l.codigo
+      `SELECT p.*, l.descrip as loteria, l.codigo, u.nombre as vendedor
         FROM premios p 
         JOIN loteria l ON p.idloteria = l.idloteria
+        JOIN usuario u ON p.idusuario = u.idusuario
       WHERE DATE(p.fecha_registro) = ?;`,
       [fecha, fecha]
     );
@@ -804,7 +832,8 @@ app.get('/api/reportes/resultados', appKeyGuard, async (req, res) => {
 
   try {
     const [rows] = await pool.query(
-      ` SELECT l.idloteria, l.descrip as loteria, r.numero, r.idresultado,
+      ` SELECT l.idloteria, l.descrip as loteria, r.numero, r.idresultado, 
+          r.publicado, l.codigo,
 			    r.fecha, IFNULL(rs.idserie,0) AS idserie, 
           IFNULL(s.descrip,'') AS serie
         FROM resultado r
@@ -1225,72 +1254,6 @@ app.delete('/api/admin/numerosbloqueados/:numero', appKeyGuard, async (req, res)
 
 
 
-/**
- * @openapi
- * /api/admin/usuarios:
- *   get:
- *     summary: Lista todos los usuarios
- *     tags: [Admin - Usuarios]
- *     security: [ { appKeyHeader: [] } ]
- *     responses:
- *       200: { description: Lista de usuarios }
- *   post:
- *     summary: Crear usuario
- *     tags: [Admin - Usuarios]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [nombre, email, password, idperfil]
- *             properties:
- *               nombre: { type: string, example: "Juan Pérez" }
- *               email: { type: string, example: "juan@example.com" }
- *               password: { type: string, example: "secret123" }
- *               idperfil: { type: integer, example: 3 }
- *     responses:
- *       200: { description: Usuario creado }
- */
-app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      `SELECT idusuario, nombre, IF(activo,'Activo','INACTIVO') AS Estado, 
-          IF(idperfil= 1,'Administrador',
-                IF(idperfil= 2,'Promotor     ',
-                'Vendedor     ')) 
-	        FROM usuario`
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/usuarios', appKeyGuard, async (req, res) => {
-  const { idperfil, nombre, login, password } = req.body;
-  try {
-    const [result] = await pool.query(
-      'INSERT INTO usuario (idperfil, nombre, login, password, activo) VALUES (?, ?, ?, ?, 1)',
-      [idperfil, nombre, login, password ]
-    );
-    res.json({ id: result.insertId, nombre, email, idperfil });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-app.delete('/api/admin/usuarios/:id', appKeyGuard, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM usuario WHERE idusuario=?', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
 
 /**
  * @openapi
@@ -1318,8 +1281,59 @@ app.delete('/api/admin/usuarios/:id', appKeyGuard, async (req, res) => {
  */
 app.get('/api/admin/loterias', appKeyGuard, async (req, res) => {
   try {
-    const [rows] = await pool.query(`SELECT * FROM loteria`);
-    res.json(rows);
+    const [rows] = await pool.query(`
+      SELECT 
+        l.idloteria,
+        l.codigo,
+        l.descrip,
+        l.activa,
+        l.serie,
+        c.dia,
+        CASE c.dia
+          WHEN 1 THEN 'Domingo'
+          WHEN 2 THEN 'Lunes'
+          WHEN 3 THEN 'Martes'
+          WHEN 4 THEN 'Miércoles'
+          WHEN 5 THEN 'Jueves'
+          WHEN 6 THEN 'Viernes'
+          WHEN 7 THEN 'Sábado'
+        END AS nombre_dia,
+        c.hora_ini,
+        c.hora_fin,
+        c.activo AS cierre_activo,
+        x.cifras AS restriccion_cifras
+      FROM loteria l
+      LEFT JOIN cierre c ON l.idloteria = c.idloteria
+      LEFT JOIN xcifras x ON l.idloteria = x.idloteria
+      ORDER BY l.idloteria, c.dia
+    `);
+
+    const loterias = {};
+    rows.forEach(r => {
+      if (!loterias[r.idloteria]) {
+        loterias[r.idloteria] = {
+          idloteria: r.idloteria,
+          codigo: r.codigo,
+          descrip: r.descrip,
+          activa: bitToBool(r.activa),
+          serie: bitToBool(r.serie),
+          restriccionCifras: r.restriccion_cifras || null, // 👈 campo único
+          cierres: []
+        };
+      }
+
+      if (r.dia !== null) {
+        loterias[r.idloteria].cierres.push({
+          dia: r.dia,
+          nombre_dia: r.nombre_dia,
+          hora_ini: r.hora_ini,
+          hora_fin: r.hora_fin,
+          activo: bitToBool(r.cierre_activo)
+        });
+      }
+    });
+
+    res.json(Object.values(loterias));
   } catch (err) {
     console.error("Error al consultar loterías:", err);
     res.status(500).json({ error: "Error al obtener las loterías" });
@@ -1327,6 +1341,424 @@ app.get('/api/admin/loterias', appKeyGuard, async (req, res) => {
 });
 
 
+/**
+ * @openapi
+ * /api/admin/vendedores:
+ *   get:
+ *     summary: Relaciones promotor-vendedor
+ *     tags: [Admin - Usuarios]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: idpromotor
+ *         required: false
+ *         schema: { type: integer }
+ *         description: Si se pasa, devuelve solo los vendedores de ese promotor
+ *     responses:
+ *       200:
+ *         description: Lista de relaciones promotor-vendedor
+ */
+app.get('/api/admin/vendedores', appKeyGuard, async (req, res) => {
+  try {
+    const { idpromotor } = req.query;
+
+    let sql = "SELECT idpromotor, idvendedor FROM vendedores";
+    let params = [];
+
+    if (idpromotor) {
+      sql += " WHERE idpromotor = ?";
+      params.push(idpromotor);
+    }
+
+    const [rows] = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error consultando vendedores" });
+  }
+});
+
+
+
+
+/**
+ * @openapi
+ * /api/admin/usuarios:
+ *   get:
+ *     summary: Lista todos los usuarios
+ *     tags: [Admin - Usuarios]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200: { description: Lista de usuarios }
+ *   post:
+ *     summary: Crear usuario
+ *     tags: [Admin - Usuarios]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [nombre, email, password, idperfil]
+ *             properties:
+ *               nombre: { type: string, example: "Juan Pérez" }
+  *               password: { type: string, example: "secret123" }
+ *               idperfil: { type: integer, example: 3 }
+ *     responses:
+ *       200: { description: Usuario creado }
+ */
+app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT idusuario, nombre, activo, idperfil, login 
+       FROM usuario`
+    );
+
+    // Convertimos activo a boolean
+    const usuarios = rows.map(u => ({
+      ...u,
+      activo: bitToBool(u.activo) // 👈 aquí usamos el helper
+    }));
+
+    res.json(usuarios);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+/**
+ * @openapi
+ * /api/admin/usuarios:
+ *   post:
+ *     summary: Crear un nuevo usuario
+ *     tags: [Admin - Usuarios]
+ *     security: [ { appKeyHeader: [] } ]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [nombre, login, password, idperfil]
+ *             properties:
+ *               nombre: { type: string, example: "Juan Pérez" }
+ *               login: { type: string, example: "jperez" }
+ *               password: { type: string, example: "123456" }
+ *               idperfil: 
+ *                 type: integer
+ *                 enum: [1, 2, 3]
+ *                 description: 1=Admin, 2=Promotor, 3=Vendedor
+ *               activo: { type: boolean, example: true }
+ *               idpromotor: 
+ *                 type: integer
+ *                 example: 1021
+ *                 description: Solo requerido si se crea un Vendedor desde Admin
+ *     responses:
+ *       200:
+ *         description: Usuario creado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 idusuario: { type: integer }
+ *       400: { description: Faltan campos obligatorios }
+ *       409: { description: Login ya en uso }
+ *       500: { description: Error interno }
+ */
+app.post('/api/admin/usuarios', appKeyGuard, async (req, res) => {
+  const { nombre, login, password, idperfil, activo, idpromotor } = req.body;
+
+  if (!nombre || !login || !password || !idperfil) {
+    return res.status(400).json({ error: "Faltan campos obligatorios" });
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Verificar login único
+    const [exists] = await conn.query(
+      "SELECT idusuario FROM usuario WHERE login = ? LIMIT 1",
+      [login]
+    );
+    if (exists.length > 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: "El login ya está en uso" });
+    }
+
+    // Hash de password (placeholder)
+    let hashed = password;
+    /*
+    if (bcrypt) {
+      const salt = await bcrypt.genSalt(10);
+      hashed = await bcrypt.hash(password, salt);
+    }
+    */
+
+    // Crear usuario
+    const [result] = await conn.query(
+      `INSERT INTO usuario (nombre, login, password, idperfil, activo)
+       VALUES (?, ?, ?, ?, ?)`,
+      [nombre, login, hashed, idperfil, activo ? 1 : 0]
+    );
+
+    const idusuario = result.insertId;
+
+    // Si es VENDEDOR (ajusta si tu enum es distinto → aquí supongo idperfil=3)
+    if (idperfil === 3) {
+      let promotorAsociado = idpromotor;
+
+      if (promotorAsociado) {
+        await conn.query(
+          `INSERT INTO vendedores (idvendedor, idpromotor)
+              VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE
+              idpromotor = VALUES(idpromotor);`,
+          [idusuario, promotorAsociado]
+        );
+      }
+    }
+
+    await conn.commit();
+    res.json({ success: true, idusuario });
+  } catch (err) {
+    await conn.rollback();
+    console.error("Error creando usuario:", err);
+    res.status(500).json({ error: "Error interno al crear usuario" });
+  } finally {
+    conn.release();
+  }
+});
+
+
+
+
+/**
+ * @openapi
+ * /api/admin/usuarios/{id}:
+ *   put:
+ *     summary: Actualizar usuario existente
+ *     tags: [Admin - Usuarios]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nombre: { type: string, example: "Juan P. Actualizado" }
+ *               password: { type: string, example: "nuevaClave" }
+ *               idperfil: 
+ *                 type: integer
+ *                 enum: [1, 2, 3]
+ *               activo: { type: boolean, example: false }
+ *               idpromotor: 
+ *                 type: integer
+ *                 example: 1021
+ *                 description: Solo usado para reasignar un vendedor a otro promotor
+ *     responses:
+ *       200:
+ *         description: Usuario actualizado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       404: { description: Usuario no encontrado }
+ *       500: { description: Error interno }
+ */
+app.put('/api/admin/usuarios/:id', appKeyGuard, async (req, res) => {
+  const { id } = req.params;
+  const { nombre, password, idperfil, activo, idpromotor } = req.body;
+
+  try {
+    const [rows] = await pool.query("SELECT * FROM usuario WHERE idusuario = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+   /* let hashed = null;
+    if (password) {
+      hashed = bcrypt
+        ? await bcrypt.hash(password, await bcrypt.genSalt(10))
+        : password;
+    }*/
+
+    await pool.query(
+      `UPDATE usuario 
+         SET nombre = COALESCE(?, nombre),
+             password = COALESCE(?, password),
+             idperfil = COALESCE(?, idperfil),
+             activo = COALESCE(?, activo)
+       WHERE idusuario = ?`,
+      [nombre, password, idperfil, activo !== undefined ? (activo ? 1 : 0) : null, id]
+    );
+
+    // Si es vendedor y el admin envía nuevo promotor → actualizar relación
+    if (idpromotor) {
+      await pool.query(
+        `INSERT INTO vendedores (idvendedor, idpromotor)
+              VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE
+              idpromotor = VALUES(idpromotor);`,
+        [id, idpromotor]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error actualizando usuario:", err);
+    res.status(500).json({ error: "Error interno al actualizar usuario" });
+  }
+});
+
+
+
+
+
+
+//SINCRONIZACION DE LOTERIAS Y RESULTADOS 
+
+const axios = require("axios");
+
+/**
+ * @openapi
+ * /api/admin/sync-loterias:
+ *   post:
+ *     summary: Sincroniza loterías desde la API externa hacia la tabla local
+ *     tags: [Loterías]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200:
+ *         description: Loterías sincronizadas correctamente
+ *       500:
+ *         description: Error al sincronizar loterías
+ */
+app.post("/api/admin/sync-loterias", appKeyGuard, async (req, res) => {
+  try {
+    const { data } = await axios.get("https://api-resultadosloterias.com/api/lotteries");
+
+    if (data.status !== "success" || !Array.isArray(data.data)) {
+      return res.status(500).json({ error: "Respuesta inválida desde API externa" });
+    }
+
+    const conn = await pool.getConnection();
+    try {
+      for (const lot of data.data) {
+        const { name, slug } = lot;
+
+        // Excluir slugs que comiencen por "5ta"
+        if (!slug || slug.toLowerCase().startsWith("5ta")) continue;
+
+        // validar si ya existe el slug
+        const [exists] = await conn.query(
+          "SELECT idloteria FROM loteria WHERE slug = ? LIMIT 1",
+          [slug]
+        );
+
+        if (exists.length === 0) {
+          await conn.query(
+            `INSERT INTO loteria (codigo, descrip, activa, serie, slug) 
+             VALUES (?, ?, ?, ?, ?)`,
+            [slug, name, 1, 0, slug]
+          );
+        }
+      }
+      res.json({ success: true, message: "Loterías sincronizadas correctamente" });
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    console.error("Error sync-loterias:", err);
+    res.status(500).json({ error: "Error al sincronizar loterías" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/sync-resultados/{fecha}:
+ *   post:
+ *     summary: Sincroniza resultados desde la API externa hacia la tabla local
+ *     tags: [Resultados]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: fecha
+ *         required: true
+ *         schema: { type: string, format: date }
+ *         description: Fecha de resultados a sincronizar (YYYY-MM-DD)
+ *     responses:
+ *       200:
+ *         description: Resultados sincronizados correctamente
+ *       500:
+ *         description: Error al sincronizar resultados
+ */
+app.post("/api/admin/sync-resultados/:fecha", appKeyGuard, async (req, res) => {
+  const { fecha } = req.params; // formato YYYY-MM-DD
+  if (!fecha) {
+    return res.status(400).json({ error: "Debe enviar la fecha en formato YYYY-MM-DD" });
+  }
+
+  try {
+    const { data } = await axios.get(
+      `https://api-resultadosloterias.com/api/results/${fecha}`
+    );
+
+    if (data.status !== "success" || !Array.isArray(data.data)) {
+      return res.status(500).json({ error: "Respuesta inválida desde API externa" });
+    }
+
+    const conn = await pool.getConnection();
+    try {
+      for (const resul of data.data) {
+        const { lottery, slug, result } = resul;
+
+        // Excluir slugs que comiencen por "5ta"
+        if (!slug || slug.toLowerCase().startsWith("5ta")) continue;
+
+        // buscar idloteria por slug
+        const [lotRows] = await conn.query(
+          "SELECT idloteria FROM loteria WHERE slug = ? LIMIT 1",
+          [slug]
+        );
+        if (lotRows.length === 0) continue; // si la lotería no existe aún, saltamos
+
+        const idloteria = lotRows[0].idloteria;
+
+        // validar si ya existe resultado para esta lotería y fecha
+        const [exists] = await conn.query(
+          "SELECT idresultado FROM resultado WHERE idloteria = ? AND fecha = ? LIMIT 1",
+          [idloteria, fecha]
+        );
+
+        if (exists.length === 0) {
+          await conn.query(
+            `INSERT INTO resultado (fecha, numero, idloteria, publicado) 
+             VALUES (?, ?, ?, NOW())`,
+            [fecha, result, idloteria]
+          );
+        }
+      }
+      res.json({ success: true, message: "Resultados sincronizados correctamente" });
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    console.error("Error sync-resultados:", err);
+    res.status(500).json({ error: "Error al sincronizar resultados" });
+  }
+});
 
 
 
