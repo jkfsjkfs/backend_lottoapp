@@ -783,6 +783,13 @@ app.get('/api/reportes/premios', appKeyGuard, async (req, res) => {
   if (!fecha) return res.status(400).json({ error: 'Falta la fecha' });
 
   try {
+
+      // 1) Invocar internamente sync-resultados
+      await axios.post(`http://localhost:${port}/api/admin/sync-resultados/${fecha}`, {}, {
+        headers: { 'x-app-key': process.env.APP_KEY } // 👈 obligatorio porque protegiste con appKeyGuard
+      });
+
+
     const [rows] = await pool.query(
       `SELECT p.*, l.descrip as loteria, l.codigo, u.nombre as vendedor
         FROM premios p 
@@ -831,24 +838,31 @@ app.get('/api/reportes/resultados', appKeyGuard, async (req, res) => {
   if (!fecha) return res.status(400).json({ error: 'Falta la fecha' });
 
   try {
+    // 1) Invocar internamente sync-resultados
+    await axios.post(`http://localhost:${port}/api/admin/sync-resultados/${fecha}`, {}, {
+      headers: { 'x-app-key': process.env.APP_KEY } // 👈 obligatorio porque protegiste con appKeyGuard
+    });
+
+    // 2) Luego consultar normalmente los resultados en BD
     const [rows] = await pool.query(
       ` SELECT l.idloteria, l.descrip as loteria, r.numero, r.idresultado, 
-          r.publicado, l.codigo,
-			    r.fecha, IFNULL(rs.idserie,0) AS idserie, 
-          IFNULL(s.descrip,'') AS serie
-        FROM resultado r
-	        JOIN loteria l ON l.idloteria = r.idloteria
-		        LEFT JOIN resserie rs ON r.idresultado = rs.idresultado
-		        LEFT JOIN serie s ON rs.idserie = s.idserie
-        WHERE DATE(r.fecha) =  ?`,
+               r.publicado, l.codigo,
+               r.fecha, IFNULL(s.idserie,0) AS idserie, 
+               IFNULL(s.descrip,'') AS serie
+            FROM resultado r
+            JOIN loteria l ON l.idloteria = r.idloteria
+            LEFT JOIN serie s ON r.serie = s.codigo
+          WHERE DATE(r.fecha) =  ?`,
       [fecha]
     );
+
     res.json(rows);
   } catch (err) {
-    console.error(err);
+    console.error('Error al consultar resultados:', err);
     res.status(500).json({ error: 'Error consultando resultados' });
   }
 });
+
 
 
 /**
@@ -1704,6 +1718,7 @@ app.post("/api/admin/sync-loterias", appKeyGuard, async (req, res) => {
   }
 });
 
+
 /**
  * @openapi
  * /api/admin/sync-resultados/{fecha}:
@@ -1737,18 +1752,21 @@ app.post("/api/admin/sync-resultados/:fecha", appKeyGuard, async (req, res) => {
     if (data.status !== "success" || !Array.isArray(data.data)) {
       return res.status(500).json({ error: "Respuesta inválida desde API externa" });
     }
-
+  
     const conn = await pool.getConnection();
     try {
       for (const resul of data.data) {
-        const { lottery, slug, result } = resul;
+        const { lottery, slug, result, series } = resul;
 
         // Excluir slugs que comiencen por "5ta"
         if (!slug || slug.toLowerCase().startsWith("5ta")) continue;
 
         // buscar idloteria por slug
         const [lotRows] = await conn.query(
-          "SELECT idloteria FROM loteria WHERE slug = ? LIMIT 1",
+          `SELECT a.idloteria 
+              FROM loteria a 
+              JOIN slugs b ON a.idloteria = b.idloteria  
+              WHERE b.slug = ? LIMIT 1`,
           [slug]
         );
         if (lotRows.length === 0) continue; // si la lotería no existe aún, saltamos
@@ -1763,9 +1781,9 @@ app.post("/api/admin/sync-resultados/:fecha", appKeyGuard, async (req, res) => {
 
         if (exists.length === 0) {
           await conn.query(
-            `INSERT INTO resultado (fecha, numero, idloteria, publicado) 
-             VALUES (?, ?, ?, NOW())`,
-            [fecha, result, idloteria]
+            `INSERT INTO resultado (fecha, numero, idloteria, publicado, serie) 
+             VALUES (?, ?, ?, NOW(), ?)`,
+            [fecha, result, idloteria, series]
           );
         }
       }
