@@ -152,7 +152,7 @@ let swaggerSpec;
 
   app.use(
     '/docs',
-    allowLocalOnly,   // solo localhost
+    //allowLocalOnly,   // solo localhost
     docsAuth,         // basic auth adicional
     swaggerUi.serve,
     swaggerUi.setup(swaggerSpec)
