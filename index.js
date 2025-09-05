@@ -55,6 +55,7 @@ const apiLimiter = rateLimit({
 });
 app.use(['/api', '/auth'], apiLimiter);
 
+
 // === SOLO LOCALHOST para Swagger (en desarrollo) ===
 function allowLocalOnly(req, res, next) {
   const ip = req.ip || req.connection?.remoteAddress || '';
@@ -80,7 +81,7 @@ const dbConfig = {
 const pool = mysql.createPool({
   ...dbConfig,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: 5,
   enableKeepAlive: true,
 });
 
