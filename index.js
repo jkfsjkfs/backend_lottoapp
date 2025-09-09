@@ -162,7 +162,8 @@ let swaggerSpec;
 // Home
 app.get('/', (req, res) => {
   if (!isProd) {
-    return allowLocalOnly(req, res, () => res.redirect('/docs'));
+    //return allowLocalOnly(req, res, () => res.redirect('/docs'));
+    return res.redirect('/docs');
   }
   res.send('Lotto API');
 });
@@ -1371,6 +1372,110 @@ app.get('/api/admin/loterias', appKeyGuard, async (req, res) => {
   } catch (err) {
     console.error("Error al consultar loterías:", err);
     res.status(500).json({ error: "Error al obtener las loterías" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/loterias/{idloteria}:
+ *   put:
+ *     summary: Actualiza lotería y cierres
+ *     tags: [Admin - Loterías]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: idloteria
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               activa: { type: boolean }
+ *               cierres:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     dia: { type: integer, example: 2 }
+ *                     hora_ini: { type: string, example: "15:00:00" }
+ *                     hora_fin: { type: string, example: "20:00:00" }
+ *                     activo: { type: boolean }
+ *     responses:
+ *       200: { description: Lotería actualizada }
+ */
+app.put('/api/admin/loterias/:idloteria', appKeyGuard, async (req, res) => {
+  const { idloteria } = req.params;
+  const { activa, cierres } = req.body;
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // 1. Actualizar estado de la lotería
+    if (activa !== undefined) {
+      await conn.query(
+        "UPDATE loteria SET activa = ? WHERE idloteria = ?",
+        [activa ? 1 : 0, idloteria]
+      );
+    }
+
+    if (Array.isArray(cierres)) {
+      // 2. Obtener los días actuales en BD
+      const [actuales] = await conn.query(
+        "SELECT dia FROM cierre WHERE idloteria = ?",
+        [idloteria]
+      );
+      const diasActuales = actuales.map(r => r.dia);
+
+      // 3. Días enviados en el body
+      const diasNuevos = cierres.map(c => c.dia);
+
+      // 4. Eliminar los días que ya no están
+      const diasEliminar = diasActuales.filter(d => !diasNuevos.includes(d));
+      if (diasEliminar.length > 0) {
+        await conn.query(
+          "DELETE FROM cierre WHERE idloteria = ? AND dia IN (?)",
+          [idloteria, diasEliminar]
+        );
+      }
+
+      // 5. Insertar o actualizar cierres enviados
+      for (const c of cierres) {
+        const [existe] = await conn.query(
+          "SELECT 1 FROM cierre WHERE idloteria = ? AND dia = ? LIMIT 1",
+          [idloteria, c.dia]
+        );
+        if (existe.length > 0) {
+          // Update si ya existe
+          await conn.query(
+            `UPDATE cierre 
+               SET hora_ini = ?, hora_fin = ?, activo = ?
+             WHERE idloteria = ? AND dia = ?`,
+            [c.hora_ini, c.hora_fin, c.activo ? 1 : 0, idloteria, c.dia]
+          );
+        } else {
+          // Insert si es nuevo
+          await conn.query(
+            `INSERT INTO cierre (idloteria, dia, hora_ini, hora_fin, activo)
+             VALUES (?, ?, ?, ?, ?)`,
+            [idloteria, c.dia, c.hora_ini, c.hora_fin, c.activo ? 1 : 0]
+          );
+        }
+      }
+    }
+
+    await conn.commit();
+    res.json({ success: true });
+  } catch (err) {
+    await conn.rollback();
+    console.error("Error actualizando lotería:", err);
+    res.status(500).json({ error: "Error al actualizar lotería" });
+  } finally {
+    conn.release();
   }
 });
 
