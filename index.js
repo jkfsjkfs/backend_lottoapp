@@ -1375,7 +1375,6 @@ app.get('/api/admin/loterias', appKeyGuard, async (req, res) => {
   }
 });
 
-
 /**
  * @openapi
  * /api/admin/loterias/{idloteria}:
@@ -1424,15 +1423,48 @@ app.put('/api/admin/loterias/:idloteria', appKeyGuard, async (req, res) => {
       );
     }
 
-    // 2. Actualizar cierres
     if (Array.isArray(cierres)) {
-      for (const c of cierres) {
+      // 2. Obtener los días actuales en BD
+      const [actuales] = await conn.query(
+        "SELECT dia FROM cierre WHERE idloteria = ?",
+        [idloteria]
+      );
+      const diasActuales = actuales.map(r => r.dia);
+
+      // 3. Días enviados en el body
+      const diasNuevos = cierres.map(c => c.dia);
+
+      // 4. Eliminar los días que ya no están
+      const diasEliminar = diasActuales.filter(d => !diasNuevos.includes(d));
+      if (diasEliminar.length > 0) {
         await conn.query(
-          `UPDATE cierre 
-             SET hora_ini = ?, hora_fin = ?, activo = ?
-           WHERE idloteria = ? AND dia = ?`,
-          [c.hora_ini, c.hora_fin, c.activo ? 1 : 0, idloteria, c.dia]
+          "DELETE FROM cierre WHERE idloteria = ? AND dia IN (?)",
+          [idloteria, diasEliminar]
         );
+      }
+
+      // 5. Insertar o actualizar cierres enviados
+      for (const c of cierres) {
+        const [existe] = await conn.query(
+          "SELECT 1 FROM cierre WHERE idloteria = ? AND dia = ? LIMIT 1",
+          [idloteria, c.dia]
+        );
+        if (existe.length > 0) {
+          // Update si ya existe
+          await conn.query(
+            `UPDATE cierre 
+               SET hora_ini = ?, hora_fin = ?, activo = ?
+             WHERE idloteria = ? AND dia = ?`,
+            [c.hora_ini, c.hora_fin, c.activo ? 1 : 0, idloteria, c.dia]
+          );
+        } else {
+          // Insert si es nuevo
+          await conn.query(
+            `INSERT INTO cierre (idloteria, dia, hora_ini, hora_fin, activo)
+             VALUES (?, ?, ?, ?, ?)`,
+            [idloteria, c.dia, c.hora_ini, c.hora_fin, c.activo ? 1 : 0]
+          );
+        }
       }
     }
 
