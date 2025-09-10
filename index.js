@@ -1549,8 +1549,16 @@ app.get('/api/admin/vendedores', appKeyGuard, async (req, res) => {
 app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT idusuario, nombre, activo, idperfil, login 
-       FROM usuario`
+      `SELECT u.idusuario, u.nombre, u.activo, u.idperfil, u.login , 
+       IFNULL((
+			  SELECT c.porcentaje
+			  FROM comision c
+			  WHERE c.idusuario = u.idusuario
+				AND c.fecha <= NOW()
+			  ORDER BY c.fecha DESC, c.idcomision DESC
+			  LIMIT 1
+			),0) AS comision
+       FROM usuario u`
     );
 
     // Convertimos activo a boolean
@@ -1902,6 +1910,123 @@ app.post("/api/admin/sync-resultados/:fecha", appKeyGuard, async (req, res) => {
     res.status(500).json({ error: "Error al sincronizar resultados" });
   }
 });
+
+
+
+
+
+/**
+ * @openapi
+ * /api/admin/comisiones:
+ *   get:
+ *     summary: Lista las comisiones de un usuario
+ *     tags: [Admin - Comisiones]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: query
+ *         name: idusuario
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Lista de comisiones
+ */
+app.get('/api/admin/comisiones', appKeyGuard, async (req, res) => {
+  const { idusuario } = req.query;
+  if (!idusuario) return res.status(400).json({ error: "Falta idusuario" });
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT idcomision, porcentaje, fecha
+         FROM comision
+        WHERE idusuario = ?
+        ORDER BY fecha DESC, idcomision DESC`,
+      [idusuario]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Error al consultar comisiones:", err);
+    res.status(500).json({ error: "Error consultando comisiones" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/comisiones:
+ *   post:
+ *     summary: Agrega una nueva comisión a un usuario
+ *     tags: [Admin - Comisiones]
+ *     security: [ { appKeyHeader: [] } ]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [idusuario, porcentaje]
+ *             properties:
+ *               idusuario: { type: integer, example: 1031 }
+ *               porcentaje: { type: number, example: 12.5 }
+ *               fecha: { type: string, format: date, example: "2025-09-08" }
+ *     responses:
+ *       200: { description: Comisión creada }
+ */
+app.post('/api/admin/comisiones', appKeyGuard, async (req, res) => {
+  const { idusuario, porcentaje, fecha } = req.body;
+  if (!idusuario || porcentaje === undefined) {
+    return res.status(400).json({ error: "Faltan datos obligatorios" });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO comision (idusuario, porcentaje, fecha)
+       VALUES (?, ?, ?)`,
+      [idusuario, porcentaje, fecha || new Date()]
+    );
+
+    res.json({ success: true, idcomision: result.insertId });
+  } catch (err) {
+    console.error("Error creando comisión:", err);
+    res.status(500).json({ error: "Error creando comisión" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/comisiones/{idcomision}:
+ *   delete:
+ *     summary: Elimina una comisión puntual
+ *     tags: [Admin - Comisiones]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: idcomision
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Comisión eliminada }
+ */
+app.delete('/api/admin/comisiones/:idcomision', appKeyGuard, async (req, res) => {
+  const { idcomision } = req.params;
+
+  try {
+    const [result] = await pool.query(
+      "DELETE FROM comision WHERE idcomision = ?",
+      [idcomision]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Comisión no encontrada" });
+    }
+
+    res.json({ success: true, message: `Comisión ${idcomision} eliminada` });
+  } catch (err) {
+    console.error("Error eliminando comisión:", err);
+    res.status(500).json({ error: "Error eliminando comisión" });
+  }
+});
+
+
 
 
 
