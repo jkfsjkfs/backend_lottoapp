@@ -236,7 +236,18 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
 				AND c.fecha <= NOW()
 			  ORDER BY c.fecha DESC, c.idcomision DESC
 			  LIMIT 1
-			),0) AS comision
+			),0) AS comision,
+
+-- Tope vigente
+       IFNULL((
+        SELECT t.valor
+        FROM topes t
+        WHERE t.idusuario = u.idusuario
+          AND t.fecha <= NOW()
+        ORDER BY t.fecha DESC, t.idtope DESC
+        LIMIT 1
+       ), 0) AS tope
+
          FROM usuario u 
         WHERE login = ?
         LIMIT 1`,
@@ -265,7 +276,8 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
       idperfil: row.idperfil,
       nombre: row.nombre,
       login: row.login,
-      comision: row.comision
+      comision: row.comision,
+      tope: row.tope
     });
     
   } catch (err) {
@@ -485,7 +497,7 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  * @openapi
  * /api/ventas/resumen:
  *   get:
- *     summary: Obtiene resumen de ventas del usuario para una fecha
+ *     summary: Obtiene resumen de ventas del usuario para una fecha y acumulado contra el tope vigente
  *     tags: [Ventas]
  *     security: [ { appKeyHeader: [] } ]
  *     parameters:
@@ -499,14 +511,14 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *         required: true
  *         schema: { type: string, format: date }
  *         description: Fecha en formato YYYY-MM-DD
-  *       - in: query
+ *       - in: query
  *         name: idpromotor
  *         required: false
  *         schema: { type: integer }
  *         description: ID del promotor
  *     responses:
  *       200:
- *         description: Resumen de ventas y comisiones
+ *         description: Resumen de ventas, comisiones y tope
  *         content:
  *           application/json:
  *             schema:
@@ -515,6 +527,9 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *                 ventasTotales: { type: number }
  *                 comisiones: { type: number }
  *                 cantidad: { type: integer }
+ *                 tope: { type: number }
+ *                 fechaInicioTope: { type: string, format: date }
+ *                 acumuladoTope: { type: number }
  */
 app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   const { idusuario, fecha, idpromotor } = req.query;
@@ -525,51 +540,78 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   try {
     const conn = await pool.getConnection();
     try {
-
+      // --- Ventas del día ---
       let sql = `
-      SELECT 
-          SUM(d.valor) AS total,
-          COUNT(DISTINCT r.id) AS cantidad,
-          SUM(
-            d.valor * (
-              SELECT c.porcentaje / 100.0
-              FROM comision c
-              WHERE c.idusuario = r.idusuario
-                AND c.fecha <= ?
-              ORDER BY c.fecha DESC, c.idcomision DESC
-              LIMIT 1
-            )
-          ) AS comisiones
-        FROM registro r
-        JOIN detalle d ON r.id = d.idregistro
-        WHERE DATE(r.fecha) = ? `;
-    
-        const params = [fecha, fecha];
+        SELECT 
+            SUM(d.valor) AS total,
+            COUNT(DISTINCT r.id) AS cantidad,
+            SUM(
+              d.valor * (
+                SELECT c.porcentaje / 100.0
+                FROM comision c
+                WHERE c.idusuario = r.idusuario
+                  AND c.fecha <= ?
+                ORDER BY c.fecha DESC, c.idcomision DESC
+                LIMIT 1
+              )
+            ) AS comisiones
+          FROM registro r
+          JOIN detalle d ON r.id = d.idregistro
+          WHERE DATE(r.fecha) = ? 
+      `;
+      const params = [fecha, fecha];
 
       if (idpromotor) {
-        sql += ` AND r.idusuario IN 
-            (SELECT idvendedor 
-              FROM vendedores 
-              WHERE idpromotor = ?)  
-            ) `;
-          params.push(idpromotor);
-      }
-      else if (idusuario) {
+        sql += ` AND r.idusuario IN (
+                   SELECT idvendedor 
+                   FROM vendedores 
+                   WHERE idpromotor = ?
+                 )`;
+        params.push(idpromotor);
+      } else if (idusuario) {
         sql += ` AND r.idusuario = ?`;
         params.push(idusuario);
       }
 
+      const [rows] = await conn.query(sql, params);
 
-
-      const [rows] = await pool.query(sql, params);
-
-
-      const porcentaje = rows[0]?.porcentaje || 0;
       const ventasTotales = rows[0]?.total || 0;
       const comisiones = rows[0]?.comisiones || 0;
       const cantidad = rows[0]?.cantidad || 0;
 
-      res.json({ ventasTotales, comisiones, cantidad });
+      // --- Tope vigente (solo aplica si hay idusuario) ---
+      let tope = null;
+      let fechaInicioTope = null;
+      let acumuladoTope = 0;
+
+      if (idusuario) {
+        const [topeRows] = await conn.query(
+          `SELECT valor, fecha 
+           FROM topes 
+           WHERE idusuario = ? AND fecha <= CURDATE() 
+           ORDER BY fecha DESC 
+           LIMIT 1`,
+          [idusuario]
+        );
+
+        if (topeRows.length > 0) {
+          tope = topeRows[0].valor;
+          fechaInicioTope = topeRows[0].fecha;
+
+          // Ventas acumuladas desde inicio del tope
+          const [acumRows] = await conn.query(
+            `SELECT IFNULL(SUM(d.valor),0) AS acumulado
+             FROM registro r
+             JOIN detalle d ON r.id = d.idregistro
+             WHERE r.idusuario = ? AND r.fecha >= ?`,
+            [idusuario, fechaInicioTope]
+          );
+
+          acumuladoTope = acumRows[0].acumulado || 0;
+        }
+      }
+
+      res.json({ ventasTotales, comisiones, cantidad, tope, fechaInicioTope, acumuladoTope });
     } finally {
       conn.release();
     }
@@ -578,6 +620,7 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
     res.status(500).json({ error: 'Error interno' });
   }
 });
+
 
 
 
