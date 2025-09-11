@@ -236,7 +236,18 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
 				AND c.fecha <= NOW()
 			  ORDER BY c.fecha DESC, c.idcomision DESC
 			  LIMIT 1
-			),0) AS comision
+			),0) AS comision,
+
+-- Tope vigente
+       IFNULL((
+        SELECT t.valor
+        FROM topes t
+        WHERE t.idusuario = u.idusuario
+          AND t.fecha <= NOW()
+        ORDER BY t.fecha DESC, t.idtope DESC
+        LIMIT 1
+       ), 0) AS tope
+
          FROM usuario u 
         WHERE login = ?
         LIMIT 1`,
@@ -265,7 +276,8 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
       idperfil: row.idperfil,
       nombre: row.nombre,
       login: row.login,
-      comision: row.comision
+      comision: row.comision,
+      tope: row.tope
     });
     
   } catch (err) {
@@ -485,7 +497,7 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  * @openapi
  * /api/ventas/resumen:
  *   get:
- *     summary: Obtiene resumen de ventas del usuario para una fecha
+ *     summary: Obtiene resumen de ventas del usuario para una fecha y acumulado contra el tope vigente
  *     tags: [Ventas]
  *     security: [ { appKeyHeader: [] } ]
  *     parameters:
@@ -499,14 +511,14 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *         required: true
  *         schema: { type: string, format: date }
  *         description: Fecha en formato YYYY-MM-DD
-  *       - in: query
+ *       - in: query
  *         name: idpromotor
  *         required: false
  *         schema: { type: integer }
  *         description: ID del promotor
  *     responses:
  *       200:
- *         description: Resumen de ventas y comisiones
+ *         description: Resumen de ventas, comisiones y tope
  *         content:
  *           application/json:
  *             schema:
@@ -515,6 +527,9 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
  *                 ventasTotales: { type: number }
  *                 comisiones: { type: number }
  *                 cantidad: { type: integer }
+ *                 tope: { type: number }
+ *                 fechaInicioTope: { type: string, format: date }
+ *                 acumuladoTope: { type: number }
  */
 app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   const { idusuario, fecha, idpromotor } = req.query;
@@ -525,51 +540,78 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
   try {
     const conn = await pool.getConnection();
     try {
-
+      // --- Ventas del día ---
       let sql = `
-      SELECT 
-          SUM(d.valor) AS total,
-          COUNT(DISTINCT r.id) AS cantidad,
-          SUM(
-            d.valor * (
-              SELECT c.porcentaje / 100.0
-              FROM comision c
-              WHERE c.idusuario = r.idusuario
-                AND c.fecha <= ?
-              ORDER BY c.fecha DESC, c.idcomision DESC
-              LIMIT 1
-            )
-          ) AS comisiones
-        FROM registro r
-        JOIN detalle d ON r.id = d.idregistro
-        WHERE DATE(r.fecha) = ? `;
-    
-        const params = [fecha, fecha];
+        SELECT 
+            SUM(d.valor) AS total,
+            COUNT(DISTINCT r.id) AS cantidad,
+            SUM(
+              d.valor * (
+                SELECT c.porcentaje / 100.0
+                FROM comision c
+                WHERE c.idusuario = r.idusuario
+                  AND c.fecha <= ?
+                ORDER BY c.fecha DESC, c.idcomision DESC
+                LIMIT 1
+              )
+            ) AS comisiones
+          FROM registro r
+          JOIN detalle d ON r.id = d.idregistro
+          WHERE DATE(r.fecha) = ? 
+      `;
+      const params = [fecha, fecha];
 
       if (idpromotor) {
-        sql += ` AND r.idusuario IN 
-            (SELECT idvendedor 
-              FROM vendedores 
-              WHERE idpromotor = ?)  
-            ) `;
-          params.push(idpromotor);
-      }
-      else if (idusuario) {
+        sql += ` AND r.idusuario IN (
+                   SELECT idvendedor 
+                   FROM vendedores 
+                   WHERE idpromotor = ?
+                 )`;
+        params.push(idpromotor);
+      } else if (idusuario) {
         sql += ` AND r.idusuario = ?`;
         params.push(idusuario);
       }
 
+      const [rows] = await conn.query(sql, params);
 
-
-      const [rows] = await pool.query(sql, params);
-
-
-      const porcentaje = rows[0]?.porcentaje || 0;
       const ventasTotales = rows[0]?.total || 0;
       const comisiones = rows[0]?.comisiones || 0;
       const cantidad = rows[0]?.cantidad || 0;
 
-      res.json({ ventasTotales, comisiones, cantidad });
+      // --- Tope vigente (solo aplica si hay idusuario) ---
+      let tope = null;
+      let fechaInicioTope = null;
+      let acumuladoTope = 0;
+
+      if (idusuario) {
+        const [topeRows] = await conn.query(
+          `SELECT valor, fecha 
+           FROM topes 
+           WHERE idusuario = ? AND fecha <= CURDATE() 
+           ORDER BY fecha DESC 
+           LIMIT 1`,
+          [idusuario]
+        );
+
+        if (topeRows.length > 0) {
+          tope = topeRows[0].valor;
+          fechaInicioTope = topeRows[0].fecha;
+
+          // Ventas acumuladas desde inicio del tope
+          const [acumRows] = await conn.query(
+            `SELECT IFNULL(SUM(d.valor),0) AS acumulado
+             FROM registro r
+             JOIN detalle d ON r.id = d.idregistro
+             WHERE r.idusuario = ? AND r.fecha >= ?`,
+            [idusuario, fechaInicioTope]
+          );
+
+          acumuladoTope = acumRows[0].acumulado || 0;
+        }
+      }
+
+      res.json({ ventasTotales, comisiones, cantidad, tope, fechaInicioTope, acumuladoTope });
     } finally {
       conn.release();
     }
@@ -578,6 +620,7 @@ app.get('/api/ventas/resumen', appKeyGuard, async (req, res) => {
     res.status(500).json({ error: 'Error interno' });
   }
 });
+
 
 
 
@@ -1550,28 +1593,43 @@ app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT u.idusuario, u.nombre, u.activo, u.idperfil, u.login , 
+       -- Comisión vigente
        IFNULL((
-			  SELECT c.porcentaje
-			  FROM comision c
-			  WHERE c.idusuario = u.idusuario
-				AND c.fecha <= NOW()
-			  ORDER BY c.fecha DESC, c.idcomision DESC
-			  LIMIT 1
-			),0) AS comision
+        SELECT c.porcentaje
+        FROM comision c
+        WHERE c.idusuario = u.idusuario
+          AND c.fecha <= NOW()
+        ORDER BY c.fecha DESC, c.idcomision DESC
+        LIMIT 1
+       ),0) AS comision,
+
+       -- Tope vigente
+       IFNULL((
+        SELECT t.valor
+        FROM topes t
+        WHERE t.idusuario = u.idusuario
+          AND t.fecha <= NOW()
+        ORDER BY t.fecha DESC, t.idtope DESC
+        LIMIT 1
+       ), 0) AS tope
+
        FROM usuario u`
     );
 
-    // Convertimos activo a boolean
+    // Convertimos activo a boolean + normalizamos tope
     const usuarios = rows.map(u => ({
       ...u,
-      activo: bitToBool(u.activo) // 👈 aquí usamos el helper
+      activo: bitToBool(u.activo),
+      tope: u.tope === -1 ? null : u.tope  // null → infinito
     }));
 
     res.json(usuarios);
   } catch (err) {
+    console.error("Error consultando usuarios:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 /**
@@ -2027,7 +2085,214 @@ app.delete('/api/admin/comisiones/:idcomision', appKeyGuard, async (req, res) =>
 });
 
 
+/**
+ * @openapi
+ * /api/admin/topes:
+ *   get:
+ *     summary: Lista todos los topes registrados
+ *     tags: [Admin - Topes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     responses:
+ *       200: { description: Lista completa de topes }
+ *       500: { description: Error interno }
+ *   post:
+ *     summary: Crea un nuevo tope para un vendedor
+ *     tags: [Admin - Topes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [idusuario, fecha, valor]
+ *             properties:
+ *               idusuario: { type: integer, example: 1031 }
+ *               fecha: { type: string, format: date, example: "2025-09-11" }
+ *               valor: { type: number, example: 500000 }
+ *     responses:
+ *       200: { description: Tope creado exitosamente }
+ *       400: { description: Faltan campos obligatorios o ya existe un tope para esa fecha }
+ *       500: { description: Error interno }
+ */
+app.get('/api/admin/topes', appKeyGuard, async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT t.idtope, t.idusuario, u.nombre, u.login, t.fecha, t.valor
+      FROM topes t
+      JOIN usuario u ON u.idusuario = t.idusuario
+      ORDER BY t.fecha DESC
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error listando topes:", err);
+    res.status(500).json({ error: "Error listando topes" });
+  }
+});
 
+app.post('/api/admin/topes', appKeyGuard, async (req, res) => {
+  const { idusuario, fecha, valor } = req.body;
+  if (!idusuario || !fecha || !valor) {
+    return res.status(400).json({ error: "Faltan campos obligatorios" });
+  }
+  try {
+    // Validar duplicado
+    const [exists] = await pool.query(
+      "SELECT 1 FROM topes WHERE idusuario = ? AND fecha = ? LIMIT 1",
+      [idusuario, fecha]
+    );
+    if (exists.length > 0) {
+      return res.status(400).json({ error: "Ya existe un tope para esa fecha" });
+    }
+
+    const [result] = await pool.query(
+      "INSERT INTO topes (idusuario, fecha, valor) VALUES (?, ?, ?)",
+      [idusuario, fecha, valor]
+    );
+    res.json({ success: true, idtope: result.insertId });
+  } catch (err) {
+    console.error("Error creando tope:", err);
+    res.status(500).json({ error: "Error creando tope" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/topes/{idtope}:
+ *   put:
+ *     summary: Actualiza un tope existente
+ *     tags: [Admin - Topes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: idtope
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fecha: { type: string, format: date, example: "2025-09-20" }
+ *               valor: { type: number, example: 700000 }
+ *     responses:
+ *       200: { description: Tope actualizado correctamente }
+ *       400: { description: No se envió ningún campo para actualizar }
+ *       404: { description: Tope no encontrado }
+ *       500: { description: Error interno }
+ *   delete:
+ *     summary: Elimina un tope existente (solo si fecha >= hoy)
+ *     tags: [Admin - Topes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: idtope
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: Tope eliminado correctamente }
+ *       400: { description: No se puede eliminar un tope con fecha anterior a hoy }
+ *       404: { description: Tope no encontrado }
+ *       500: { description: Error interno }
+ */
+app.put('/api/admin/topes/:idtope', appKeyGuard, async (req, res) => {
+  const { idtope } = req.params;
+  const { fecha, valor } = req.body;
+
+  if (!fecha && valor === undefined) {
+    return res.status(400).json({ error: "Debe enviar al menos un campo para actualizar" });
+  }
+
+  try {
+    let sql = "UPDATE topes SET ";
+    const params = [];
+    if (fecha) { sql += "fecha = ?, "; params.push(fecha); }
+    if (valor !== undefined) { sql += "valor = ?, "; params.push(valor); }
+    sql = sql.slice(0, -2); // quitar última coma
+    sql += " WHERE idtope = ?";
+    params.push(idtope);
+
+    const [result] = await pool.query(sql, params);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Tope no encontrado" });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error editando tope:", err);
+    res.status(500).json({ error: "Error editando tope" });
+  }
+});
+
+app.delete('/api/admin/topes/:idtope', appKeyGuard, async (req, res) => {
+  const { idtope } = req.params;
+  try {
+    const [rows] = await pool.query("SELECT fecha FROM topes WHERE idtope = ?", [idtope]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Tope no encontrado" });
+    }
+
+    const fecha = new Date(rows[0].fecha);
+    const hoy = new Date();
+    const fechaStr = fecha.toISOString().slice(0, 10);
+    const hoyStr = hoy.toISOString().slice(0, 10);
+
+    if (fechaStr < hoyStr) {
+      return res.status(400).json({ error: "No se puede eliminar un tope con fecha anterior a hoy" });
+    }
+
+    const [result] = await pool.query("DELETE FROM topes WHERE idtope = ?", [idtope]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Tope no encontrado" });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error eliminando tope:", err);
+    res.status(500).json({ error: "Error eliminando tope" });
+  }
+});
+
+/**
+ * @openapi
+ * /api/admin/topes/vendedor/{idusuario}:
+ *   get:
+ *     summary: Obtiene el tope actual y el historial de topes de un vendedor
+ *     tags: [Admin - Topes]
+ *     security: [ { appKeyHeader: [] } ]
+ *     parameters:
+ *       - in: path
+ *         name: idusuario
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Tope actual y lista de topes
+ *       500:
+ *         description: Error interno
+ */
+app.get('/api/admin/topes/vendedor/:idusuario', appKeyGuard, async (req, res) => {
+  const { idusuario } = req.params;
+  try {
+    const [detalle] = await pool.query(
+      "SELECT idtope, fecha, valor FROM topes WHERE idusuario = ? ORDER BY fecha ASC",
+      [idusuario]
+    );
+
+    const [actualRow] = await pool.query(
+      "SELECT idtope, fecha, valor FROM topes WHERE idusuario = ? AND fecha <= CURDATE() ORDER BY fecha DESC LIMIT 1",
+      [idusuario]
+    );
+
+    res.json({
+      actual: actualRow.length > 0 ? actualRow[0] : null,
+      detalle
+    });
+  } catch (err) {
+    console.error("Error consultando topes vendedor:", err);
+    res.status(500).json({ error: "Error consultando topes vendedor" });
+  }
+});
 
 
 
