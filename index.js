@@ -329,9 +329,9 @@ app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
   const { series } = req.query;
 
   let cSql = '';
-  if(series)
-    cSql = ` AND l.serie = ${series} `
-  
+  if (series) {
+    cSql = ` AND l.serie = ${series} `;
+  }
 
   try {
     const conn = await pool.getConnection();
@@ -350,7 +350,7 @@ app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
             ON l.idloteria = c.idloteria
            AND c.dia = DAYOFWEEK(NOW())
            AND CAST(NOW() AS TIME) BETWEEN c.hora_ini AND c.hora_fin
-        WHERE l.activa = 1  AND c.activo = 1
+        WHERE l.activa = 1 AND c.activo = 1
         ${cSql}
         ORDER BY c.hora_fin , l.codigo
       `);
@@ -359,11 +359,18 @@ app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
     } finally {
       conn.release();
     }
-  } catch (error) {
-    console.error('Error al consultar loterías:', error);
+  } catch (err) {
+    console.error('Error al consultar loterías:', err);
+
+    // 👉 Manejo detallado de errores MySQL
+    if (err.sqlMessage) {
+      return res.status(400).json({ error: err.sqlMessage });
+    }
+
     res.status(500).json({ error: 'Error al obtener las loterías' });
   }
 });
+
 
 /**
  * @openapi
