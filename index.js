@@ -237,7 +237,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
 			  SELECT c.porcentaje
 			  FROM comision c
 			  WHERE c.idusuario = u.idusuario
-				AND c.fecha <= NOW()
+				AND c.fecha <= CONVERT_TZ(NOW(), '+00:00', '-05:00')
 			  ORDER BY c.fecha DESC, c.idcomision DESC
 			  LIMIT 1
 			),0) AS comision,
@@ -247,7 +247,7 @@ app.post('/auth/login', appKeyGuard, async (req, res) => {
         SELECT t.valor
         FROM topes t
         WHERE t.idusuario = u.idusuario
-          AND t.fecha <= NOW()
+          AND t.fecha <= CONVERT_TZ(NOW(), '+00:00', '-05:00')
         ORDER BY t.fecha DESC, t.idtope DESC
         LIMIT 1
        ), 0) AS tope
@@ -961,7 +961,7 @@ app.get('/api/reportes/cierres', appKeyGuard, async (req, res) => {
         FROM loteria l
         JOIN cierre c 
             ON l.idloteria = c.idloteria
-           AND c.dia = DAYOFWEEK(NOW())
+           AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
         WHERE l.activa = 1  AND c.activo = 1
         ORDER BY c.hora_fin , l.codigo`
     );
@@ -1615,7 +1615,7 @@ app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
         SELECT c.porcentaje
         FROM comision c
         WHERE c.idusuario = u.idusuario
-          AND c.fecha <= NOW()
+          AND c.fecha <= CONVERT_TZ(NOW(), '+00:00', '-05:00')
         ORDER BY c.fecha DESC, c.idcomision DESC
         LIMIT 1
        ),0) AS comision,
@@ -1625,7 +1625,7 @@ app.get('/api/admin/usuarios', appKeyGuard, async (req, res) => {
         SELECT t.valor
         FROM topes t
         WHERE t.idusuario = u.idusuario
-          AND t.fecha <= NOW()
+          AND t.fecha <= CONVERT_TZ(NOW(), '+00:00', '-05:00')
         ORDER BY t.fecha DESC, t.idtope DESC
         LIMIT 1
        ), 0) AS tope
