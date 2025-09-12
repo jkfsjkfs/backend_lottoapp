@@ -349,22 +349,21 @@ const localTime = now.toTimeString().slice(0,8); // "HH:MM:SS"
 
       const [rows] = await conn.query(`
         SELECT 
-            l.idloteria,
-            l.codigo,
-            l.descrip,
-            l.activa, l.serie, 
-            c.dia,
-            c.hora_ini,
-            c.hora_fin
-        FROM loteria l
-        JOIN cierre c 
-            ON l.idloteria = c.idloteria
-           AND c.dia = ?
-           AND ? BETWEEN c.hora_ini AND c.hora_fin
-        WHERE l.activa = 1 AND c.activo = 1
-        ${cSql}
-        ORDER BY c.hora_fin , l.codigo
-      `, [localDay, localTime]);
+  l.idloteria, l.codigo, l.descrip, l.activa, l.serie, 
+  c.dia, c.hora_ini, c.hora_fin,
+  CAST(CONVERT_TZ(NOW(), '+00:00', '-05:00') AS TIME) AS hora_local,
+  DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00')) AS dia_local
+FROM loteria l
+JOIN cierre c 
+  ON l.idloteria = c.idloteria
+ AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
+ AND CAST(CONVERT_TZ(NOW(), '+00:00', '-05:00') AS TIME) BETWEEN c.hora_ini AND c.hora_fin
+WHERE l.activa = 1 
+  AND c.activo = 1
+  ${cSql}
+ORDER BY c.hora_fin , l.codigo;
+
+      `);
 
       res.json(rows);
     } finally {
