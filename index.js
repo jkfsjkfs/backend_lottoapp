@@ -83,7 +83,11 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 5,
   enableKeepAlive: true,
+  
+  timezone: '-05:00'   // 👈 fuerza hora local Colombia
 });
+
+
 
 // Helpers
 function bitToBool(val) {
