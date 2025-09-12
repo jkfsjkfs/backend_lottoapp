@@ -340,6 +340,13 @@ app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
   try {
     const conn = await pool.getConnection();
     try {
+
+const now = new Date();
+const localDay = now.getDay() + 1; // getDay: 0=domingo → MySQL usa 1=domingo
+const localTime = now.toTimeString().slice(0,8); // "HH:MM:SS"
+
+
+
       const [rows] = await conn.query(`
         SELECT 
             l.idloteria,
@@ -352,12 +359,12 @@ app.get('/api/loteriasdia', appKeyGuard, async (req, res) => {
         FROM loteria l
         JOIN cierre c 
             ON l.idloteria = c.idloteria
-           AND c.dia = DAYOFWEEK(NOW())
-           AND CAST(NOW() AS TIME) BETWEEN c.hora_ini AND c.hora_fin
+           AND c.dia = ?
+           AND ? BETWEEN c.hora_ini AND c.hora_fin
         WHERE l.activa = 1 AND c.activo = 1
         ${cSql}
         ORDER BY c.hora_fin , l.codigo
-      `);
+      `, [localDay, localTime]);
 
       res.json(rows);
     } finally {
