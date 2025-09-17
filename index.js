@@ -1135,13 +1135,12 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
   }
 });
 
-
 // 🗑️ Eliminar una venta
 /**
  * @openapi
  * /api/ventas/{id}:
  *   delete:
- *     summary: Elimina una venta por ID
+ *     summary: Elimina una venta por ID (solo si es del día y ninguna lotería está cerrando en 30 min)
  *     tags:
  *       - Ventas
  *     parameters:
@@ -1154,15 +1153,8 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
  *     responses:
  *       200:
  *         description: Venta eliminada correctamente
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 message:
- *                   type: string
+ *       400:
+ *         description: Restricción de eliminación
  *       404:
  *         description: Venta no encontrada
  *       500:
@@ -1184,7 +1176,6 @@ app.delete("/api/ventas/:id", async (req, res) => {
     const fechaRegistro = new Date(rows[0].fecha);
     const hoy = new Date();
 
-    // normalizamos a solo fecha (sin horas)
     const fechaRegistroStr = fechaRegistro.toISOString().slice(0, 10);
     const hoyStr = hoy.toISOString().slice(0, 10);
 
@@ -1194,7 +1185,41 @@ app.delete("/api/ventas/:id", async (req, res) => {
         .json({ error: "No se permite eliminar registros de fechas anteriores a hoy" });
     }
 
-    // 2. Eliminar si la fecha es de hoy
+    // 2. Validar horarios de cierre de las loterías asociadas al detalle
+    const [loterias] = await pool.query(
+      `SELECT l.idloteria, l.codigo, c.hora_fin
+       FROM detalle d
+       JOIN loteria l ON d.idloteria = l.idloteria
+       JOIN cierre c ON c.idloteria = l.idloteria
+       WHERE d.idregistro = ? 
+         AND c.dia = DAYOFWEEK(NOW())`,
+      [id]
+    );
+
+    if (loterias.length > 0) {
+      const now = new Date();
+      const bloqueadas = [];
+
+      for (const lot of loterias) {
+        const [hh, mm, ss] = lot.hora_fin.split(":");
+        const cierreHora = new Date();
+        cierreHora.setHours(parseInt(hh), parseInt(mm), parseInt(ss), 0);
+
+        const diffMin = (cierreHora - now) / (1000 * 60);
+
+        if (diffMin <= 30) {
+          bloqueadas.push(lot.codigo);
+        }
+      }
+
+      if (bloqueadas.length > 0) {
+        return res.status(400).json({
+          error: `No se puede eliminar la venta: las siguientes loterías cierran en menos de 30 minutos → ${bloqueadas.join(", ")}`
+        });
+      }
+    }
+
+    // 3. Eliminar si pasa todas las validaciones
     const [result] = await pool.query("DELETE FROM registro WHERE id = ?", [id]);
 
     if (result.affectedRows === 0) {
