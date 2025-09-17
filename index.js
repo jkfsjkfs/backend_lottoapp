@@ -1134,7 +1134,6 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
     res.status(500).json({ error: 'Error al obtener las cifras bloqueadas' });
   }
 });
-
 // 🗑️ Eliminar una venta
 /**
  * @openapi
@@ -1160,26 +1159,29 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
  *       500:
  *         description: Error en el servidor
  */
+// 🗑️ Eliminar una venta
 app.delete("/api/ventas/:id", async (req, res) => {
   const { id } = req.params;
+  const conn = await pool.getConnection();
   try {
-    // 1. Buscar la fecha del registro antes de eliminar
-    const [rows] = await pool.query(
-      "SELECT fecha FROM registro WHERE id = ?",
+    await conn.beginTransaction();
+
+    // 1. Buscar la venta principal
+    const [rows] = await conn.query(
+      "SELECT * FROM registro WHERE id = ?",
       [id]
     );
-
     if (rows.length === 0) {
+      await conn.release();
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    // 2. Validar que la fecha del registro sea de hoy (hora local -05:00)
-    const [[{ fecha_local }]] = await pool.query(
+    // 2. Validar fecha de hoy (hora local -05:00)
+    const [[{ fecha_local }]] = await conn.query(
       "SELECT CONVERT_TZ(?, '+00:00', '-05:00') AS fecha_local",
       [rows[0].fecha]
     );
-
-    const [[{ hoy_local }]] = await pool.query(
+    const [[{ hoy_local }]] = await conn.query(
       "SELECT CONVERT_TZ(NOW(), '+00:00', '-05:00') AS hoy_local"
     );
 
@@ -1187,45 +1189,79 @@ app.delete("/api/ventas/:id", async (req, res) => {
     const hoyStr = new Date(hoy_local).toISOString().slice(0, 10);
 
     if (fechaRegistroStr !== hoyStr) {
-      return res
-        .status(400)
-        .json({ error: "No se permite eliminar registros de fechas anteriores a hoy" });
+      await conn.release();
+      return res.status(400).json({
+        error: "No se permite eliminar registros de fechas anteriores a hoy",
+      });
     }
 
-    // 3. Validar si alguna lotería asociada cierra en los próximos 30 minutos
-const [bloqueadas] = await pool.query(
-  `
-  SELECT l.codigo, c.hora_fin
-  FROM detalle d
-  JOIN loteria l ON l.idloteria = d.idloteria
-  JOIN cierre c ON c.idloteria = l.idloteria
-  WHERE d.idregistro = ?
-    AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
-    AND CONVERT_TZ(NOW(), '+00:00', '-05:00') >= SUBTIME(c.hora_fin, '00:30:00')
-  `,
-  [id]
-);
+    // 3. Validar loterías con cierre en menos de 30 min
+    const [bloqueadas] = await conn.query(
+      `
+      SELECT l.codigo, c.hora_fin
+      FROM detalle d
+      JOIN loteria l ON l.idloteria = d.idloteria
+      JOIN cierre c ON c.idloteria = l.idloteria
+      WHERE d.idregistro = ?
+        AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
+        AND CONVERT_TZ(NOW(), '+00:00', '-05:00') >= SUBTIME(c.hora_fin, '00:30:00')
+      `,
+      [id]
+    );
 
-if (bloqueadas.length > 0) {
-  const codigos = bloqueadas.map(b => b.codigo);
-  return res.status(400).json({
-    error: `No se puede eliminar la venta: \nLas siguientes loterías ya cerraron 
-    o cierran en menos de 30 minutos \n → ${codigos.join(", ")}`,
-    loterias: codigos
-  });
-}
+    if (bloqueadas.length > 0) {
+      const codigos = bloqueadas.map((b) => b.codigo);
+      await conn.release();
+      return res.status(400).json({
+        error: `No se puede eliminar la venta: \nLas siguientes loterías ya cerraron o cierran en menos de 30 minutos \n → ${codigos.join(
+          ", "
+        )}`,
+        loterias: codigos,
+      });
+    }
 
+    // 4. Obtener toda la info (en memoria, aún no guardamos en borrado)
+    const [detalles] = await conn.query(
+      "SELECT * FROM detalle WHERE idregistro = ?",
+      [id]
+    );
+    const [series] = await conn.query(
+      "SELECT * FROM detserie WHERE idregistro = ?",
+      [id]
+    );
 
-    // 4. Eliminar si pasa las validaciones
-    const [result] = await pool.query("DELETE FROM registro WHERE id = ?", [id]);
+    const datosVenta = {
+      registro: rows[0],
+      detalle: detalles,
+      detserie: series,
+    };
+
+    // 5. Eliminar de la tabla registro
+    const [result] = await conn.query("DELETE FROM registro WHERE id = ?", [
+      id,
+    ]);
     if (result.affectedRows === 0) {
+      await conn.rollback();
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    res.json({ success: true, message: `Venta ${id} eliminada` });
+    // 6. Solo si se eliminó → guardamos en borrado
+    await conn.query(
+      "INSERT INTO borrado (idregistro, datos) VALUES (?, ?)",
+      [id, JSON.stringify(datosVenta)]
+    );
+
+    await conn.commit();
+    res.json({
+      success: true,
+      message: `Venta ${id} eliminada `,
+    });
   } catch (err) {
-    //console.error("Error eliminando venta:", err);
+    await conn.rollback();
+    console.error("Error eliminando venta:", err);
     res.status(500).json({ error: "Error eliminando venta" });
+  } finally {
+    conn.release();
   }
 });
 
