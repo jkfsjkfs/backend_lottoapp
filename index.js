@@ -1221,20 +1221,26 @@ app.delete("/api/ventas/:id", async (req, res) => {
     }
 
     // 4. Obtener toda la info (en memoria, aún no guardamos en borrado)
-    const [detalles] = await conn.query(
-      "SELECT * FROM detalle WHERE idregistro = ?",
-      [id]
-    );
-    const [series] = await conn.query(
-      "SELECT * FROM detserie WHERE idregistro = ?",
-      [id]
-    );
+      const [detalles] = await conn.query(
+        `SELECT d.*, l.codigo as loteria FROM detalle d join loteria l on d.idloteria = l.idloteria 
+            WHERE idregistro = ?`,
+        [id]
+      );
 
-    const datosVenta = {
-      registro: rows[0],
-      detalle: detalles,
-      detserie: series,
-    };
+      const [series] = await conn.query(
+        `SELECT ds.*
+        FROM detserie ds
+        JOIN detalle d ON ds.iddetalle = d.iddetalle
+        WHERE d.idregistro = ?`,
+        [id]
+      );
+
+      const datosVenta = {
+        registro: rows[0],
+        detalle: detalles,
+        detserie: series,
+      };
+
 
     // 5. Eliminar de la tabla registro
     const [result] = await conn.query("DELETE FROM registro WHERE id = ?", [
@@ -2369,6 +2375,83 @@ app.get('/api/admin/topes/vendedor/:idusuario', appKeyGuard, async (req, res) =>
     res.status(500).json({ error: "Error consultando topes vendedor" });
   }
 });
+
+
+
+/**
+ * @openapi
+ * /api/ventas/borrados:
+ *   get:
+ *     summary: Lista las ventas eliminadas (tabla borrado)
+ *     tags:
+ *       - Ventas
+ *     parameters:
+ *       - name: fecha
+ *         in: query
+ *         required: false
+ *         description: Fecha específica en formato YYYY-MM-DD (opcional)
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Lista de ventas eliminadas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id:
+ *                     type: integer
+ *                   idregistro:
+ *                     type: integer
+ *                   datos:
+ *                     type: object
+ *                   fecha_borrado:
+ *                     type: string
+ *       500:
+ *         description: Error en el servidor
+ */
+app.get("/api/ventas/borrados", async (req, res) => {
+  try {
+    const { fecha } = req.query;
+
+    let sql = "SELECT idregistro, datos, fecha_borrado FROM borrado";
+    const params = [];
+
+    if (fecha) {
+      sql += " WHERE DATE(fecha_borrado) = ?";
+      params.push(fecha);
+    }
+
+    sql += " ORDER BY fecha_borrado DESC";
+
+    const [rows] = await pool.query(sql, params);
+
+    // 🔹 Parseamos JSON de la columna "datos"
+    const result = rows.map(r => {
+      let datosParsed;
+      try {
+        datosParsed = JSON.parse(r.datos);
+      } catch (e) {
+        datosParsed = null; // por si hay un error al parsear
+      }
+      return {
+        idregistro: r.idregistro,
+        datos: datosParsed,
+        fecha_borrado: r.fecha_borrado
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error("Error consultando borrados:", err);
+    res.status(500).json({ error: "Error consultando borrados" });
+  }
+});
+
+
 
 
 
