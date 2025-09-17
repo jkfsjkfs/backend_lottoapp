@@ -1140,7 +1140,7 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
  * @openapi
  * /api/ventas/{id}:
  *   delete:
- *     summary: Elimina una venta por ID (solo si es del día y ninguna lotería está cerrando en 30 min)
+ *     summary: Elimina una venta por ID (siempre que ninguna lotería asociada cierre en los próximos 30 min)
  *     tags:
  *       - Ventas
  *     parameters:
@@ -1154,7 +1154,7 @@ app.get('/api/xcifras', appKeyGuard, async (req, res) => {
  *       200:
  *         description: Venta eliminada correctamente
  *       400:
- *         description: Restricción de eliminación
+ *         description: Restricción de tiempo de cierre
  *       404:
  *         description: Venta no encontrada
  *       500:
@@ -1173,11 +1173,18 @@ app.delete("/api/ventas/:id", async (req, res) => {
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    const fechaRegistro = new Date(rows[0].fecha);
-    const hoy = new Date();
+    // 2. Validar que la fecha del registro sea de hoy (hora local -05:00)
+    const [[{ fecha_local }]] = await pool.query(
+      "SELECT CONVERT_TZ(?, '+00:00', '-05:00') AS fecha_local",
+      [rows[0].fecha]
+    );
 
-    const fechaRegistroStr = fechaRegistro.toISOString().slice(0, 10);
-    const hoyStr = hoy.toISOString().slice(0, 10);
+    const [[{ hoy_local }]] = await pool.query(
+      "SELECT CONVERT_TZ(NOW(), '+00:00', '-05:00') AS hoy_local"
+    );
+
+    const fechaRegistroStr = new Date(fecha_local).toISOString().slice(0, 10);
+    const hoyStr = new Date(hoy_local).toISOString().slice(0, 10);
 
     if (fechaRegistroStr !== hoyStr) {
       return res
@@ -1185,43 +1192,31 @@ app.delete("/api/ventas/:id", async (req, res) => {
         .json({ error: "No se permite eliminar registros de fechas anteriores a hoy" });
     }
 
-    // 2. Validar horarios de cierre de las loterías asociadas al detalle
-    const [loterias] = await pool.query(
-      `SELECT l.idloteria, l.codigo, c.hora_fin
-       FROM detalle d
-       JOIN loteria l ON d.idloteria = l.idloteria
-       JOIN cierre c ON c.idloteria = l.idloteria
-       WHERE d.idregistro = ? 
-         AND c.dia = DAYOFWEEK(NOW())`,
+    // 3. Validar si alguna lotería asociada cierra en los próximos 30 minutos
+    const [bloqueadas] = await pool.query(
+      `
+      SELECT l.codigo, c.hora_fin
+      FROM detalle d
+      JOIN loteria l ON l.idloteria = d.idloteria
+      JOIN cierre c ON c.idloteria = l.idloteria
+      WHERE d.idregistro = ?
+        AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
+        AND CONVERT_TZ(NOW(), '+00:00', '-05:00') 
+            BETWEEN SUBTIME(c.hora_fin, '00:30:00') AND c.hora_fin
+      `,
       [id]
     );
 
-    if (loterias.length > 0) {
-      const now = new Date();
-      const bloqueadas = [];
-
-      for (const lot of loterias) {
-        const [hh, mm, ss] = lot.hora_fin.split(":");
-        const cierreHora = new Date();
-        cierreHora.setHours(parseInt(hh), parseInt(mm), parseInt(ss), 0);
-
-        const diffMin = (cierreHora - now) / (1000 * 60);
-
-        if (diffMin <= 30) {
-          bloqueadas.push(lot.codigo);
-        }
-      }
-
-      if (bloqueadas.length > 0) {
-        return res.status(400).json({
-          error: `No se puede eliminar la venta: las siguientes loterías cierran en menos de 30 minutos → ${bloqueadas.join(", ")}`
-        });
-      }
+    if (bloqueadas.length > 0) {
+      const codigos = bloqueadas.map(b => b.codigo);
+      return res.status(400).json({
+        error: "No se puede eliminar: algunas loterías cierran en menos de 30 minutos",
+        loterias: codigos
+      });
     }
 
-    // 3. Eliminar si pasa todas las validaciones
+    // 4. Eliminar si pasa las validaciones
     const [result] = await pool.query("DELETE FROM registro WHERE id = ?", [id]);
-
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: "Venta no encontrada" });
     }
@@ -1232,6 +1227,7 @@ app.delete("/api/ventas/:id", async (req, res) => {
     res.status(500).json({ error: "Error eliminando venta" });
   }
 });
+
 
 
 
