@@ -1207,13 +1207,14 @@ app.delete("/api/ventas/:id", async (req, res) => {
       [id]
     );
 
-    if (bloqueadas.length > 0) {
-      const codigos = bloqueadas.map(b => b.codigo);
-      return res.status(400).json({
-        error: `No se puede eliminar: algunas loterías cierran en menos de 30 minutos ({codigos})`,
-        loterias: codigos
-      });
-    }
+if (bloqueadas.length > 0) {
+  const codigos = bloqueadas.map(b => b.codigo);
+  return res.status(400).json({
+    error: `No se puede eliminar: algunas loterías cierran en menos de 30 minutos (${codigos.join(", ")})`,
+    loterias: codigos
+  });
+}
+
 
     // 4. Eliminar si pasa las validaciones
     const [result] = await pool.query("DELETE FROM registro WHERE id = ?", [id]);
