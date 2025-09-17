@@ -1210,7 +1210,7 @@ app.delete("/api/ventas/:id", async (req, res) => {
     if (bloqueadas.length > 0) {
       const codigos = bloqueadas.map(b => b.codigo);
       return res.status(400).json({
-        error: "No se puede eliminar: algunas loterías cierran en menos de 30 minutos",
+        error: `No se puede eliminar: algunas loterías cierran en menos de 30 minutos ({codigos})`,
         loterias: codigos
       });
     }
@@ -1223,7 +1223,7 @@ app.delete("/api/ventas/:id", async (req, res) => {
 
     res.json({ success: true, message: `Venta ${id} eliminada` });
   } catch (err) {
-    console.error("Error eliminando venta:", err);
+    //console.error("Error eliminando venta:", err);
     res.status(500).json({ error: "Error eliminando venta" });
   }
 });
