@@ -468,7 +468,8 @@ app.post('/api/apuestas', appKeyGuard, async (req, res) => {
 
     // 1) Insertar cabecera
     const [result] = await conn.execute(
-      'INSERT INTO registro (idusuario, nombre, telefono) VALUES (?, ?, ?)',
+      `INSERT INTO registro (idusuario, nombre, telefono, fecha) VALUES (?, ?, ?, 
+                CONVERT_TZ(NOW(), '+00:00', '-05:00'))`,
       [idusuario, nombre, telefono]
     );
     const idregistro = result.insertId;
@@ -1971,7 +1972,7 @@ app.post("/api/admin/sync-resultados/:fecha", appKeyGuard, async (req, res) => {
         if (exists.length === 0) {
           await conn.query(
             `INSERT INTO resultado (fecha, numero, idloteria, publicado, serie) 
-             VALUES (?, ?, ?, NOW(), ?)`,
+             VALUES (?, ?, ?, CONVERT_TZ(NOW(), '+00:00', '-05:00'), ?)`,
             [fecha, result, idloteria, series]
           );
         }
