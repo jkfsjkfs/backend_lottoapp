@@ -1193,19 +1193,18 @@ app.delete("/api/ventas/:id", async (req, res) => {
     }
 
     // 3. Validar si alguna lotería asociada cierra en los próximos 30 minutos
-    const [bloqueadas] = await pool.query(
-      `
-      SELECT l.codigo, c.hora_fin
-      FROM detalle d
-      JOIN loteria l ON l.idloteria = d.idloteria
-      JOIN cierre c ON c.idloteria = l.idloteria
-      WHERE d.idregistro = ?
-        AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
-        AND CONVERT_TZ(NOW(), '+00:00', '-05:00') 
-            BETWEEN SUBTIME(c.hora_fin, '00:30:00') AND c.hora_fin
-      `,
-      [id]
-    );
+const [bloqueadas] = await pool.query(
+  `
+  SELECT l.codigo, c.hora_fin
+  FROM detalle d
+  JOIN loteria l ON l.idloteria = d.idloteria
+  JOIN cierre c ON c.idloteria = l.idloteria
+  WHERE d.idregistro = ?
+    AND c.dia = DAYOFWEEK(CONVERT_TZ(NOW(), '+00:00', '-05:00'))
+    AND CONVERT_TZ(NOW(), '+00:00', '-05:00') >= SUBTIME(c.hora_fin, '00:30:00')
+  `,
+  [id]
+);
 
 if (bloqueadas.length > 0) {
   const codigos = bloqueadas.map(b => b.codigo);
